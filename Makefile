@@ -1,32 +1,36 @@
 STD_FLAGS = -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN
 LIBS = -lvulkan -lX11 -lXext -lXcursor -lXrandr -lXdmcp -lXau -ldl
-TARGET = huinya_engine
 SRCS = src/main.cpp src/rgfw.cpp src/vulkanshit.cpp
-RELEASE_FLAGS = -O2 -DNDEBUG
-DEV_FLAGS = -O0 -g
-OBJDIR = obj
-OBJS = $(SRCS:src/%.cpp=$(OBJDIR)/%.o)
+OBJS = $(SRCS:src/%.cpp=obj/%.o)
 
-all: $(TARGET)
+all: shaders huinya_engine
 
-$(TARGET): $(OBJS)
-	g++ $(STD_FLAGS) $(RELEASE_FLAGS) $^ -o $@ $(LIBS)
+huinya_engine: $(OBJS)
+	g++ $(STD_FLAGS) -O2 -DNDEBUG $^ -o $@ $(LIBS)
 
-$(OBJDIR)/%.o: src/%.cpp | $(OBJDIR)
-	g++ $(STD_FLAGS) $(RELEASE_FLAGS) -c $< -o $@
+obj/%.o: src/%.cpp | obj
+	g++ $(STD_FLAGS) -O2 -DNDEBUG -c $< -o $@
 
-dev: $(TARGET)
+dev: shaders huinya_engine
 
-$(TARGET): $(OBJS)
-	g++ $(STD_FLAGS) $(DEV_FLAGS) $^ -o $@ $(LIBS)
+huinya_engine: $(OBJS)
+	g++ $(STD_FLAGS) -O0 -g $^ -o $@ $(LIBS)
 
-$(OBJDIR)/%.o: src/%.cpp | $(OBJDIR)
-	g++ $(STD_FLAGS) $(DEV_FLAGS) -c $< -o $@
+obj/%.o: src/%.cpp | obj
+	g++ $(STD_FLAGS) -O0 -g -c $< -o $@
 
-$(OBJDIR):
+shaders: shaders/vert.spv shaders/frag.spv
+
+shaders/vert.spv: shaders/vert.glsl
+	glslc -fshader-stage=vert $< -o $@
+
+shaders/frag.spv: shaders/frag.glsl
+	glslc -fshader-stage=frag $< -o $@
+
+obj:
 	mkdir -p $@
 
 clean:
-	rm -rf obj $(TARGET)
+	rm -rf obj huinya_engine shaders/*.spv
 
-.PHONY: all dev clean
+.PHONY: all dev shaders clean
