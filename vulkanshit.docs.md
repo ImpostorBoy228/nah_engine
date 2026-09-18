@@ -36,6 +36,7 @@
 namespace vks {
 
 struct Vec2 { float x, y; };          // 2D-точка/вектор
+struct Vec3 { float x, y, z; };       // 3D-вектор
 struct Vec4 { float x, y, z, w; };    // 4D-вектор, цвет (RGBA) или позиция с w
 
 // Ось-выровненный прямоугольник на одной плоскости (UV или координаты).
@@ -45,6 +46,9 @@ struct Color { float r, g, b, a; };   // цвет в диапазоне [0, 1]
 
 // Колоночно-ориентированная матрица 4x4, совместима с GLSL mat4.
 struct Mat4 { float m[16]; };
+
+// 4x4 column-major matmul: a * b. GCC auto-vectorizes with -O2/-O3.
+Mat4 mat4_mul(const Mat4& a, const Mat4& b);
 
 }
 ```
@@ -309,6 +313,8 @@ void destroy_frame_pipeline(const Device& device, FramePipeline& pipeline);
 2. создать `VkSurfaceKHR` поверх окна (например через RGFW: `rgfw::createSurface`)
 3. `vks::create_device(instance, surface)`
 4. `vks::create_swapchain(device, surface, width, height)`
+   — создаёт depth image + view внутри `Swapchain` (D32_SFLOAT или
+   D24_UNORM_S8_UINT), destroy_swapchain очищает их.
 5. `vks::create_descriptor_layout(...)` и `vks::create_descriptor_pool(...)` (по желанию)
 6. `vks::create_frame_pipeline(device, swapchain, shader_dir, config)`
 7. создать UBO/вершинные буферы, текстуры, `allocate_descriptor_sets` +
@@ -378,12 +384,21 @@ void wait_device_idle(Device& device);  // vkDeviceWaitIdle
 - UBO `FrameData` — **set 0, binding 0**:
   ```glsl
   layout(set = 0, binding = 0) uniform FrameData {
-      mat4 projection;
-      vec2 screen_size;   // не используется пока
+      mat4 view;
+      mat4 proj;
+      mat4 view_proj;       // proj * view, baked on CPU
+      vec3 camera_pos;      // for specular / IBL
+      float _pad0;
+      vec3 sun_dir;         // light direction
+      float _pad1;
       float time;
+      float _pad2;
+      float _pad3;
+      float _pad4;
   } frame;
   ```
-  Обратите внимание: в шейдере 3 поля, в C++ есть `_pad` для выравнивания std140.
+  Поля alignованы для std140: после каждого `vec3` следует `float _pad`.
+  `view_proj` умножается на CPU в `mat4_mul` — GCC авто-векторизует при `-O2`.
 - Текстуры — **set 0, binding 1**: `uniform sampler2D textures[16];`
   (массив из 16 CDN сэмплеров, индекс выбирается вершинным `texIndex`).
 - Фрагментный выход: `outColor = texture(textures[texIndex], uv) * color;`
@@ -473,10 +488,17 @@ std::vector<VkDescriptorSet> sets = vks::allocate_descriptor_sets(device, pool, 
 
 ```cpp
 struct FrameData {
-    vks::Mat4 projection;
-    vks::Vec2 screen_size;
+    vks::Mat4 view;
+    vks::Mat4 proj;
+    vks::Mat4 view_proj;
+    vks::Vec3 camera_pos;
+    float     _pad0;
+    vks::Vec3 sun_dir;
+    float     _pad1;
     float     time;
-    float     _pad;
+    float     _pad2;
+    float     _pad3;
+    float     _pad4;
 };
 
 vks::Buffer ubo = vks::create_buffer(device, sizeof(FrameData),

@@ -213,6 +213,96 @@ uint32_t find_memory_type(VkPhysicalDevice physical, uint32_t type_filter, VkMem
     throw std::runtime_error("[vk] failed to find suitable memory type");
 }
 
+// Chooses the first available depth format with stencil if possible.
+bool find_depth_format(VkPhysicalDevice physical, VkFormat* out_format) {
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+    };
+    for (VkFormat format : candidates) {
+        VkFormatProperties props;
+        vkGetPhysicalDeviceFormatProperties(physical, format, &props);
+        if (props.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) {
+            *out_format = format;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Creates a depth image, allocates device-local memory, and makes a view.
+bool create_depth_resources(const Device& device, const Swapchain& swapchain,
+                            VkImage& depth_image, VkDeviceMemory& depth_memory,
+                            VkImageView& depth_view, VkFormat& depth_format) {
+    if (!find_depth_format(device.physical, &depth_format)) {
+        std::cerr << "[vk] failed to find depth format\n";
+        return false;
+    }
+
+    VkImageCreateInfo image_info = {};
+    image_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    image_info.imageType     = VK_IMAGE_TYPE_2D;
+    image_info.extent.width  = swapchain.extent.width;
+    image_info.extent.height = swapchain.extent.height;
+    image_info.extent.depth  = 1;
+    image_info.mipLevels     = 1;
+    image_info.arrayLayers   = 1;
+    image_info.format        = depth_format;
+    image_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    image_info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    image_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+    image_info.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateImage(device.handle, &image_info, nullptr, &depth_image) != VK_SUCCESS) {
+        std::cerr << "[vk] vkCreateImage (depth) failed\n";
+        return false;
+    }
+
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(device.handle, depth_image, &requirements);
+
+    VkMemoryAllocateInfo alloc_info = {};
+    alloc_info.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = requirements.size;
+    try {
+        alloc_info.memoryTypeIndex = find_memory_type(
+            device.physical, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    } catch (const std::exception& error) {
+        std::cerr << error.what() << "\n";
+        vkDestroyImage(device.handle, depth_image, nullptr);
+        return false;
+    }
+
+    if (vkAllocateMemory(device.handle, &alloc_info, nullptr, &depth_memory) != VK_SUCCESS) {
+        std::cerr << "[vk] vkAllocateMemory (depth) failed\n";
+        vkDestroyImage(device.handle, depth_image, nullptr);
+        return false;
+    }
+    vkBindImageMemory(device.handle, depth_image, depth_memory, 0);
+
+    VkImageViewCreateInfo view_info = {};
+    view_info.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    view_info.image    = depth_image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format   = depth_format;
+    view_info.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_DEPTH_BIT;
+    view_info.subresourceRange.baseMipLevel   = 0;
+    view_info.subresourceRange.levelCount     = 1;
+    view_info.subresourceRange.baseArrayLayer = 0;
+    view_info.subresourceRange.layerCount     = 1;
+
+    if (vkCreateImageView(device.handle, &view_info, nullptr, &depth_view) != VK_SUCCESS) {
+        std::cerr << "[vk] failed to create depth image view\n";
+        vkFreeMemory(device.handle, depth_memory, nullptr);
+        vkDestroyImage(device.handle, depth_image, nullptr);
+        return false;
+    }
+
+    return true;
+}
+
 // Allocates a transient command buffer, submits the recorded commands on the
 // graphics queue and blocks until the queue is idle. Used for staging copies
 // and image layout transitions.
@@ -350,23 +440,40 @@ VkResult create_render_pass(const Device& device, const Swapchain& swapchain, Fr
     color_reference.attachment = 0;
     color_reference.layout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+    VkAttachmentDescription depth_attachment = {};
+    depth_attachment.format         = swapchain.depth_format;
+    depth_attachment.samples        = VK_SAMPLE_COUNT_1_BIT;
+    depth_attachment.loadOp         = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depth_attachment.storeOp        = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.stencilLoadOp  = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    depth_attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depth_attachment.initialLayout  = VK_IMAGE_LAYOUT_UNDEFINED;
+    depth_attachment.finalLayout    = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+    VkAttachmentReference depth_reference = {};
+    depth_reference.attachment = 1;
+    depth_reference.layout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
     VkSubpassDescription subpass = {};
     subpass.pipelineBindPoint       = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount    = 1;
     subpass.pColorAttachments       = &color_reference;
+    subpass.pDepthStencilAttachment = &depth_reference;
 
     VkSubpassDependency dependency = {};
     dependency.srcSubpass    = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass    = 0;
-    dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependency.srcAccessMask = 0;
-    dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstStageMask  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+
+    VkAttachmentDescription attachments[] = { color_attachment, depth_attachment };
 
     VkRenderPassCreateInfo create_info = {};
     create_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-    create_info.attachmentCount = 1;
-    create_info.pAttachments    = &color_attachment;
+    create_info.attachmentCount = 2;
+    create_info.pAttachments    = attachments;
     create_info.subpassCount    = 1;
     create_info.pSubpasses      = &subpass;
     create_info.dependencyCount = 1;
@@ -453,6 +560,14 @@ VkResult create_graphics_pipeline(const Device& device, const Swapchain& swapcha
     color_blending.attachmentCount = 1;
     color_blending.pAttachments    = &blend_attachment;
 
+    VkPipelineDepthStencilStateCreateInfo depth_stencil = {};
+    depth_stencil.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depth_stencil.depthTestEnable  = VK_FALSE;   // 2D overlay: depth пока не нужен
+    depth_stencil.depthWriteEnable = VK_FALSE;
+    depth_stencil.depthCompareOp   = VK_COMPARE_OP_LESS_OR_EQUAL;
+    depth_stencil.depthBoundsTestEnable = VK_FALSE;
+    depth_stencil.stencilTestEnable     = VK_FALSE;
+
     VkPipelineLayoutCreateInfo layout_info = {};
     layout_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layout_info.pushConstantRangeCount = 0;
@@ -485,6 +600,7 @@ VkResult create_graphics_pipeline(const Device& device, const Swapchain& swapcha
     pipeline_info.pRasterizationState = &rasterizer;
     pipeline_info.pMultisampleState   = &multisampling;
     pipeline_info.pColorBlendState    = &color_blending;
+    pipeline_info.pDepthStencilState  = &depth_stencil;
     pipeline_info.pDynamicState       = &dynamic_state;
     pipeline_info.layout              = pipeline.layout;
     pipeline_info.renderPass          = pipeline.render_pass;
@@ -536,11 +652,13 @@ VkResult create_framebuffers(const Device& device, const Swapchain& swapchain, F
 
     pipeline.framebuffers.reserve(pipeline.image_views.size());
     for (VkImageView view : pipeline.image_views) {
+        VkImageView attachments[] = { view, swapchain.depth_view };
+
         VkFramebufferCreateInfo create_info = {};
         create_info.sType           = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
         create_info.renderPass      = pipeline.render_pass;
-        create_info.attachmentCount = 1;
-        create_info.pAttachments    = &view;
+        create_info.attachmentCount = 2;
+        create_info.pAttachments    = attachments;
         create_info.width           = swapchain.extent.width;
         create_info.height          = swapchain.extent.height;
         create_info.layers          = 1;
@@ -637,18 +755,47 @@ VkResult create_sync_objects(const Device& device, const Swapchain& swapchain, F
 Mat4 ortho_projection(float width, float height) {
     Mat4 out = {};
     // Maps screen space with the origin at the top-left to NDC [-1, 1].
-    // Vulkan's NDC has +Y going down, so the rows match window pixels 1:1
-    // and the winding stays as authored (clockwise quads stay clockwise).
+    // Vulkan's NDC has +Y going down, so flip Y (negative scale) and shift
+    // the origin so top-left maps to (-1, +1) and bottom-right to (+1, -1).
     out.m[0]  =  2.0f / width;
-    out.m[5]  =  2.0f / height;
+    out.m[5]  = -2.0f / height;
     out.m[10] =  1.0f;
-    out.m[12] = -1.0f;
-    out.m[13] = -1.0f;
+    out.m[12] = -1.0f;        // left → -1
+    out.m[13] =  1.0f;        // top  → +1 (flipped sign on Y)
     out.m[15] =  1.0f;
     return out;
 }
 
+// a * b, column-major. GCC auto-vectorizes this with -O2/-O3.
+Mat4 mat4_mul(const Mat4& a, const Mat4& b) {
+    Mat4 result;
+    // Each column of result = a * (column of b).
+    for (int col = 0; col < 4; col++) {
+        const float bc0 = b.m[col    ];
+        const float bc1 = b.m[col + 4];
+        const float bc2 = b.m[col + 8];
+        const float bc3 = b.m[col + 12];
+
+        result.m[col    ] = a.m[0] * bc0 + a.m[4] * bc1 + a.m[8]  * bc2 + a.m[12] * bc3;
+        result.m[col + 4] = a.m[1] * bc0 + a.m[5] * bc1 + a.m[9]  * bc2 + a.m[13] * bc3;
+        result.m[col + 8] = a.m[2] * bc0 + a.m[6] * bc1 + a.m[10] * bc2 + a.m[14] * bc3;
+        result.m[col + 12] = a.m[3] * bc0 + a.m[7] * bc1 + a.m[11] * bc2 + a.m[15] * bc3;
+    }
+    return result;
+}
+
 // ---------------- Buffer ----------------
+
+VkDeviceSize align_size(VkDeviceSize size, VkDeviceSize alignment) {
+    if (alignment == 0) return size;
+    return (size + alignment - 1) & ~(alignment - 1);
+}
+
+VkDeviceSize min_ubo_alignment(const Device& device) {
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(device.physical, &props);
+    return props.limits.minUniformBufferOffsetAlignment;
+}
 
 Buffer create_buffer(const Device& device, VkDeviceSize size, VkBufferUsageFlags usage, bool host_visible) {
     Buffer out;
@@ -1264,10 +1411,29 @@ Swapchain create_swapchain(const Device& device, VkSurfaceKHR surface, uint32_t 
     vkGetSwapchainImagesKHR(device.handle, out.handle, &image_count, nullptr);
     out.images.resize(image_count);
     vkGetSwapchainImagesKHR(device.handle, out.handle, &image_count, out.images.data());
+
+    // Create depth image + view.
+    if (!create_depth_resources(device, out, out.depth_image, out.depth_memory,
+                                out.depth_view, out.depth_format)) {
+        std::cerr << "[vk] failed to create depth resources\n";
+        vkDestroySwapchainKHR(device.handle, out.handle, nullptr);
+        out = {};
+        return out;
+    }
+
     return out;
 }
 
 void destroy_swapchain(const Device& device, Swapchain& swapchain) {
+    if (swapchain.depth_view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device.handle, swapchain.depth_view, nullptr);
+    }
+    if (swapchain.depth_image != VK_NULL_HANDLE) {
+        vkDestroyImage(device.handle, swapchain.depth_image, nullptr);
+    }
+    if (swapchain.depth_memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device.handle, swapchain.depth_memory, nullptr);
+    }
     if (swapchain.handle != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(device.handle, swapchain.handle, nullptr);
     }
@@ -1387,7 +1553,9 @@ VkCommandBuffer begin_frame(const Device& device, Swapchain& swapchain, FramePip
         return VK_NULL_HANDLE;
     }
 
-    VkClearValue clear_color = { { { 0.0f, 0.0f, 0.0f, 1.0f } } };
+    VkClearValue clear_values[2];
+    clear_values[0].color        = { { 0.0f, 0.0f, 0.0f, 1.0f } };
+    clear_values[1].depthStencil = { 1.0f, 0 };
 
     VkRenderPassBeginInfo render_pass_info = {};
     render_pass_info.sType           = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1395,8 +1563,8 @@ VkCommandBuffer begin_frame(const Device& device, Swapchain& swapchain, FramePip
     render_pass_info.framebuffer     = pipeline.framebuffers[image_index];
     render_pass_info.renderArea.offset = { 0, 0 };
     render_pass_info.renderArea.extent = swapchain.extent;
-    render_pass_info.clearValueCount   = 1;
-    render_pass_info.pClearValues      = &clear_color;
+    render_pass_info.clearValueCount   = 2;
+    render_pass_info.pClearValues      = clear_values;
 
     vkCmdBeginRenderPass(cmd, &render_pass_info, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1483,15 +1651,19 @@ VkResult recreate_swapchain(const Device& device, Swapchain& swapchain, FramePip
     const bool alpha_blend = pipeline.alpha_blend;
     const bool cull_mode   = pipeline.backface_cull;
 
-    std::string shader_dir = pipeline.shader_dir;
-    destroy_frame_pipeline(device, pipeline);
+    std::string shader_dir   = pipeline.shader_dir;
+    uint32_t    old_width    = swapchain.width;
+    uint32_t    old_height   = swapchain.height;
+    VkSurfaceKHR surface      = swapchain.surface;
 
-    VkSurfaceKHR surface = swapchain.surface;
-    uint32_t     width   = swapchain.width;
-    uint32_t     height  = swapchain.height;
+    // The image count can change on resize, so sync vectors tied to it
+    // (image_fences[image_index], render_finished[image_index]) become stale.
+    // We must rebuild the whole frame pipeline, which in turn recreates
+    // render_finished and image_fences with the new swapchain image count.
+    destroy_frame_pipeline(device, pipeline);
     destroy_swapchain(device, swapchain);
 
-    swapchain = create_swapchain(device, surface, width, height);
+    swapchain = create_swapchain(device, surface, old_width, old_height);
     if (swapchain.handle == VK_NULL_HANDLE) {
         return VK_ERROR_INITIALIZATION_FAILED;
     }

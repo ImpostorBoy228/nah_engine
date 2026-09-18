@@ -21,10 +21,17 @@ struct Vertex {
 
 // UBO: set=0, binding=0
 struct FrameData {
-    vks::Mat4 projection;
-    vks::Vec2 screen_size;
-    float time;
-    float _pad;
+    vks::Mat4 view;
+    vks::Mat4 proj;
+    vks::Mat4 view_proj;      // proj * view, computed once on CPU
+    vks::Vec3 camera_pos;     // for specular / IBL
+    float     _pad0;
+    vks::Vec3 sun_dir;        // light direction
+    float     _pad1;
+    float     time;
+    float     _pad2;
+    float     _pad3;
+    float     _pad4;
 };
 
 class Hell_Machina { // BLACKBOX
@@ -128,10 +135,37 @@ private:
 
     void update_ubo(size_t frame_index, uint32_t width, uint32_t height) {
         FrameData frame_data{};
-        frame_data.projection = vks::ortho_projection((float)width, (float)height);
-        frame_data.screen_size = { (float)width, (float)height };
-        frame_data.time = std::chrono::duration<float>( std::chrono::steady_clock::now() - start_time).count();
-        frame_data._pad = 0.0f;
+
+        const float w = static_cast<float>(width);
+        const float h = static_cast<float>(height);
+
+        // View: identity (2D overlay space, top-left origin).
+        frame_data.view = vks::Mat4{
+            1.0f, 0.0f, 0.0f, 0.0f,
+            0.0f, 1.0f, 0.0f, 0.0f,
+            0.0f, 0.0f, 1.0f, 0.0f,
+            0.0f, 0.0f, 0.0f, 1.0f
+        };
+
+        frame_data.proj = vks::ortho_projection(w, h);
+
+        // view_proj = proj * view — computed on CPU so the shader does fewer ops.
+        // GCC auto-vectorizes this with -O2/-O3 (4-wide mat4 mul).
+        frame_data.view_proj = vks::mat4_mul(frame_data.proj, frame_data.view);
+
+        frame_data.camera_pos = { 0.0f, 0.0f, 0.0f };
+
+        frame_data.sun_dir = { 0.0f, -1.0f, 0.0f };
+
+        frame_data.time = std::chrono::duration<float>(
+            std::chrono::steady_clock::now() - start_time).count();
+
+        frame_data._pad0 = 0.0f;
+        frame_data._pad1 = 0.0f;
+        frame_data._pad2 = 0.0f;
+        frame_data._pad3 = 0.0f;
+        frame_data._pad4 = 0.0f;
+
         vks::update_buffer(device, ubos[frame_index], &frame_data, sizeof(FrameData));
     }
 
@@ -185,6 +219,8 @@ private:
         }
 
         constexpr uint32_t k_frames = vks::k_max_frames_in_flight;
+        const VkDeviceSize ubo_align = vks::min_ubo_alignment(device);
+        const VkDeviceSize ubo_size  = vks::align_size(sizeof(FrameData), ubo_align);
 
         const std::vector<VkDescriptorPoolSize> pool_sizes = {
             { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, k_frames },
@@ -215,7 +251,7 @@ private:
         std::array<VkImageView, 16> texture_views;
         texture_views.fill(white_texture.view);
         for (size_t i = 0; i < k_frames; i++) {
-            ubos[i] = vks::create_buffer(device, sizeof(FrameData),
+            ubos[i] = vks::create_buffer(device, ubo_size,
                                          VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true);
             if (ubos[i].handle == VK_NULL_HANDLE) {
                 fuckup("failed to create UBO");
@@ -288,27 +324,25 @@ public:
         update_ubo(frame, w, h);
 
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout,
+                                0, 1, &descriptor_sets[frame], 0, nullptr);
+
+        VkBuffer vertex_buffers[] = { vbos[frame].handle };
+        VkDeviceSize offsets[] = { 0 };
+        vkCmdBindVertexBuffers(cmd, 0, 1, vertex_buffers, offsets);
 
         if (!vertices.empty()) {
-            vks::Buffer& vbo = vbos[frame];
             VkDeviceSize needed = vertices.size() * sizeof(Vertex);
-            if (needed > vbo.size) {
-                vks::destroy_buffer(device, vbo);
-                vbo = vks::create_buffer(device, needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true);
-                if (vbo.handle == VK_NULL_HANDLE) {
+            if (needed > vbos[frame].size) {
+                vks::destroy_buffer(device, vbos[frame]);
+                vbos[frame] = vks::create_buffer(device, needed, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, true);
+                if (vbos[frame].handle == VK_NULL_HANDLE) {
                     std::cerr << "failed to grow VBO\n";
                     vks::end_frame(device, swapchain, pipeline, cmd);
                     return false;
                 }
             }
-            vks::update_buffer(device, vbo, vertices.data(), needed);
-
-            VkBuffer vertex_buffers[] = { vbo.handle };
-            VkDeviceSize offsets[] = { 0 };
-            vkCmdBindVertexBuffers(cmd, 0, 1, vertex_buffers, offsets);
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout,
-                                    0, 1, &descriptor_sets[frame], 0, nullptr);
-
+            vks::update_buffer(device, vbos[frame], vertices.data(), needed);
             vkCmdDraw(cmd, static_cast<uint32_t>(vertices.size()), 1, 0, 0);
         }
 

@@ -20,6 +20,7 @@ constexpr uint32_t k_max_frames_in_flight = 2;
 // ---------------- Math bricks ----------------
 
 struct Vec2 { float x, y; };
+struct Vec3 { float x, y, z; };
 struct Vec4 { float x, y, z, w; };
 
 // Axis-aligned rect on a single UV or coordinate plane.
@@ -29,6 +30,9 @@ struct Color { float r, g, b, a; };
 
 // Column-major, matches GLSL mat4.
 struct Mat4 { float m[16]; };
+
+// 4x4 column-major matmul: a * b. Auto-vectorizable.
+Mat4 mat4_mul(const Mat4& a, const Mat4& b);
 
 // Orthographic projection mapping pixel space (origin at top-left) into NDC.
 Mat4 ortho_projection(float width, float height);
@@ -62,6 +66,12 @@ struct Buffer {
     VkDeviceSize   size   = 0;
     void*          mapped = nullptr;
 };
+
+// Aligns a size up to the given alignment (must be a power of two).
+VkDeviceSize align_size(VkDeviceSize size, VkDeviceSize alignment);
+
+// Queries minUniformBufferOffsetAlignment from the physical device limits.
+VkDeviceSize min_ubo_alignment(const Device& device);
 
 // Creates a buffer. host_visible implies VK_MEMORY_PROPERTY_HOST_VISIBLE |
 // HOST_COHERENT and a persistent map; otherwise memory is DEVICE_LOCAL and
@@ -132,6 +142,12 @@ struct Swapchain {
     VkFormat       format = VK_FORMAT_UNDEFINED;
     VkExtent2D     extent = {0, 0};
     std::vector<VkImage> images;
+
+    // Depth buffer paired with this swapchain.
+    VkImage        depth_image = VK_NULL_HANDLE;
+    VkDeviceMemory depth_memory = VK_NULL_HANDLE;
+    VkImageView    depth_view = VK_NULL_HANDLE;
+    VkFormat       depth_format = VK_FORMAT_UNDEFINED;
 
     // Creation parameters, kept to rebuild the swapchain on VK_ERROR_OUT_OF_DATE_KHR.
     VkSurfaceKHR surface = VK_NULL_HANDLE;

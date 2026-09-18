@@ -1,4 +1,4 @@
-STD_FLAGS = -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN
+STD_FLAGS = -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN -fopt-info-vec-all
 LIBS = -lvulkan -lX11 -lXext -lXcursor -lXrandr -lXdmcp -lXau -ldl
 SRCS = src/main.cpp src/rgfw.cpp src/vulkanshit.cpp
 
