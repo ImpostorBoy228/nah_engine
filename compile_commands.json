@@ -1,0 +1,17 @@
+[
+  {
+    "directory": "/home/impostorboy/projects/huinya_engine",
+    "file": "/home/impostorboy/projects/huinya_engine/src/main.cpp",
+    "command": "g++ -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN -O0 -g -c src/main.cpp -o obj/main.o"
+  },
+  {
+    "directory": "/home/impostorboy/projects/huinya_engine",
+    "file": "/home/impostorboy/projects/huinya_engine/src/rgfw.cpp",
+    "command": "g++ -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN -O0 -g -c src/rgfw.cpp -o obj/rgfw.o"
+  },
+  {
+    "directory": "/home/impostorboy/projects/huinya_engine",
+    "file": "/home/impostorboy/projects/huinya_engine/src/vulkanshit.cpp",
+    "command": "g++ -std=c++26 -Wall -Wextra -Isrc -Iexternal -DRGFW_VULKAN -O0 -g -c src/vulkanshit.cpp -o obj/vulkanshit.o"
+  }
+]

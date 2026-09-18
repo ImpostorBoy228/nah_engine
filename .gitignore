@@ -1,0 +1,11 @@
+obj/
+build/
+cmake-build-*/
+.cache/
+.vscode/
+.idea/
+*.vs
+huinya_engine
+nah_engine
+external/vkbootstrap
+shaders/*.spv
