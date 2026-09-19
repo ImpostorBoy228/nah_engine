@@ -2,26 +2,19 @@
 
 #include "heck.hpp"
 
+#include "bgfx/bgfx.h"
+
 int main() {
-    Hell_Machina hell(900, 900);
-    std::cout << "hello from huinya engine\n";
+    bgfx::Init init;
+    init.reset = 60;
+    bgfx::init(init);
 
-    if (RGFW_window* win = hell.get_window()) {
-        RGFW_window_setExitKey(win, RGFW_escape);
-    }
+    std::cout << "bgfx initialized\n";
+    std::cout << "render device: "
+              << bgfx::getRendererName(bgfx::getRendererType())
+              << "\n";
 
-    while (!hell.shouldClose()) {
-        hell.pollEvents();
-
-        hell.clear();
-        hell.push_rectangle({ 100.0f, 100.0f }, { 200.0f, 200.0f }, { 1.0f, 0.0f, 0.0f, 1.0f }, 0);
-
-        if (!hell.draw()) {
-            std::cerr << "failed to draw frame\n";
-            break;
-        }
-    }
-
-    std::cout << "bye\n";
+    bgfx::frame();
+    bgfx::shutdown();
     return 0;
 }
