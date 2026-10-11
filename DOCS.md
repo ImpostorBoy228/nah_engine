@@ -148,29 +148,59 @@ create its own buffers, pipelines and descriptor sets.
 
 ### renderer: primitives
 
+`src/render/textures.hpp` (`namespace prim`) owns every gpu texture behind small
+stable handles. `TextureCache` is a fixed pool of `MAX_TEXTURES = 128`
+`casino::Texture` slots: slot 0 is a reserved white 1x1 that backs every
+untextured prim and is never recycled, slots 1..127 come from a freelist.
+
+- a `TextureId { index, gen }` is the handle; `packId`/`unpackId` squash it into
+  one int64 so the lua ffi can pass it around as a plain number
+- `acquire(path)` is path-keyed: the same png loads once, a second acquire just
+  bumps a refcount and returns the same id; `release` drops the refcount and
+  returns the slot to the freelist at zero
+- each slot carries a `gen` bumped on (re)acquire, and `get` falls back to the
+  white texture on a stale handle, so a use-after-free can never crash a draw
+- the cache owns the descriptor pool + set layout (moved out of `Primitives`),
+  `// BLACKBOX` on `init` and `acquire`
+
+```c++
+prim::TextureCache tex;
+tex.init(device);
+prim::TextureId uv = tex.acquire("assets/uv.png");   // same path -> same id
+tex.release(uv);
+```
+
 `src/render/primitives.hpp` (`namespace prim`) is a 2d immediate-mode batcher on
 top of `casino::Device`. Coordinates are relative: `(0,0)` top-left, `(1,1)`
-bottom-right, y-down. One pipeline (vertex color * texture), a white 1x1 texture
-stands in for untextured prims. `// BLACKBOX` on `init`, `createTexture`,
-`loadTexture`.
+bottom-right, y-down. One pipeline (vertex color * texture), textures come from
+the `TextureCache`, the white 1x1 lives there and stands in for untextured prims.
+`// BLACKBOX` on `init` and `drawImageFit`.
 
-- `drawRect`, `drawTriangle`, `drawImage` push vertices into a flat array
+- `drawRect`, `drawTriangle`, `drawImage` push vertices into a flat array;
+  `drawImage` takes either a `TextureId` or a raw `casino::Texture`
+- the `Anchor` enum (`top_left`/`top_right`/`bottom_left`/`bottom_right`/`center`)
+  replaces hand-written `w*0.5` math, `drawImageFit` keeps the pixel aspect square
+  on a non square window by reading `device.currentExtent()`
 - verts are grouped into batches by descriptor set (one batch per texture),
   `render` copies the array into the frame's host-visible vertex buffer and
   issues one `vkCmdDraw` per batch
-- `MAX_VERTS = 65536`, `MAX_TEXTURES = 128`; an overflow drops the vertex
+- `MAX_VERTS = 65536`; an overflow drops the vertex
 
 ```c++
 prim::Primitives prims;
-prims.init(device);
-casino::Texture uv;
-prims.loadTexture(&uv, "assets/uv.png");
+prims.init(device, tex);
 
 prims.begin();
 prims.drawRect(0.05f, 0.25f, 0.25f, 0.25f, prim::rgba(0.90f, 0.25f, 0.35f, 1.0f));
-prims.drawImage(uv, x, y, w, h);
+prims.drawImage(uv, 0.5f, 0.72f, 0.55f, 0.3f, prim::Anchor::center);
 prims.render(device.currentCommand(), device.frameSlot());
 ```
+
+`src/render/drawlist.hpp` (`namespace prim`) is a retained draw list. It records
+`rect`/`triangle`/`image`/`imageFit` ops once and `replay(prims)` re-issues them
+into the batcher every frame, so a static scene is built once (from lua at
+startup) instead of re-issued through the ffi each frame. Dynamic draws can skip
+the list and hit the batcher directly. `MAX_OPS = 4096`.
 
 ### renderer: image
 
@@ -192,6 +222,24 @@ script, the constructor opens the standard libs, the destructor closes the
 state. It also exposes a small C API (`gachicreate` / `gachicum` / `gachiprint`
 on a `GachiMan` struct) that `main.lua` calls through the LuaJIT FFI. For
 `ffi.C` to resolve those symbols the binary is linked with `-rdynamic`.
+
+### render C ABI (lua -> engine)
+
+`main()` builds the `casino::Device`, `prim::TextureCache`, `prim::Primitives` and
+`prim::DrawList`, packs them into a `NahCtx` and hands it to lua with `nah_bind`.
+From there `main.lua` drives the whole 2d scene through `extern "C"` wrappers, so
+`main.cpp` stays nothing but `main()`:
+
+- `nah_tex(path)` -> a packed int64 texture handle (0 on failure)
+- `nah_clear()` resets the draw list
+- `nah_rect`, `nah_triangle` push a colored prim
+- `nah_image(handle, x, y, w, h, anchor)` and `nah_image_fit(handle, cx, cy, w, anchor)`
+  push an image; `anchor` is `0..4` for the `prim::Anchor` enum, `fit` keeps the
+  pixel aspect on any window
+
+the script builds the scene once at startup, the frame loop just calls
+`scene.replay(prims)` each frame. `// BLACKBOX` is not used here, these are thin
+forwarders.
 
 the script (`src/luascripts/main.lua`) is deployed next to the executable and
 `assets/` into `<game>/assets/`, both picked up by `paths::resolve` at runtime.

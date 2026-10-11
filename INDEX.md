@@ -17,10 +17,12 @@
 | `src/window/rgfw_shit.hpp` | public windowing API of the engine (`namespace rgfw`), grouped into lifecycle / events / window state / input / vulkan |
 | `src/window/rgfw_shit.cpp` | implementation of that API: event translation, lifecycle bookkeeping, vulkan surface |
 | `src/render/vulkan_casino_777.hpp` | header-only vulkan layer (`namespace casino`): `class Device` (instance, device, swapchain, `beginFrame`/`endFrame` loop) plus RAII `Pipeline`, `GpuBuffer` and `Texture` helpers |
-| `src/render/primitives.hpp` | header-only 2d batcher (`namespace prim`, `class Primitives`): rects, triangles and images in relative coords, one pipeline, texture batching |
+| `src/render/textures.hpp` | header-only texture manager (`namespace prim`): `TextureId` handle + `TextureCache`, a fixed pool of 128 gpu textures behind refcounted slots recycled through a freelist, path-keyed so the same png loads once, gen-tagged so a stale handle can never crash a draw |
+| `src/render/primitives.hpp` | header-only 2d batcher (`namespace prim`, `class Primitives`): rects, triangles and images in relative coords, one pipeline, texture batching, `Anchor` enum and aspect-correct `drawImageFit` |
+| `src/render/drawlist.hpp` | header-only retained draw list (`namespace prim`, `class DrawList`): records rect/triangle/image ops once and replays them into the batcher every frame, so a static scene is not re-issued from lua each frame |
 | `src/render/image.hpp` | header-only dependency-free PNG loader (`namespace img`): hand-written inflate + filters, decodes to rgba8 |
 | `src/paths.hpp` | resolves asset/script paths relative to the executable (`namespace paths`), so the game runs from any cwd |
-| `src/ligma.hpp` | thin LuaJIT wrapper (`class Ligma`) plus a small `GachiMan` C API that `main.lua` calls through the FFI |
+| `src/ligma.hpp` | thin LuaJIT wrapper (`class Ligma`) plus a small `GachiMan` C API that `main.lua` calls through the FFI, and the `nah_*` render C ABI (`NahCtx` + `nah_bind`/`nah_tex`/`nah_clear`/`nah_rect`/`nah_triangle`/`nah_image`/`nah_image_fit`) that drives the texture cache and draw list from lua |
 
 ## assets + shaders
 
