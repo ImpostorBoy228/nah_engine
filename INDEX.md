@@ -5,7 +5,7 @@
 | file | what |
 |---|---|
 | `Makefile` | thin wrapper over `citrus` targets: `all`, `fetch`, `depmake`, `protocols`, `shaders`, `run`, `clean` |
-| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs wayland-scanner for the wayland protocols, compiles C/C++ units, links |
+| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs wayland-scanner for the wayland protocols, compiles C/C++ units, links; cmake-style `[n/N]` progress with a red counter and a green label, full command line printed under every step, compiler stdout muted (`NO_COLOR` disables the color) |
 
 ## src
 
@@ -16,7 +16,7 @@
 | `src/window/rgfw.c` | RGFW 1.8.1 implementation TU, compiled as **C** (`gcc -std=c11`), silences the debug spam |
 | `src/window/rgfw_shit.hpp` | public windowing API of the engine (`namespace rgfw`), grouped into lifecycle / events / window state / input / vulkan |
 | `src/window/rgfw_shit.cpp` | implementation of that API: event translation, lifecycle bookkeeping, vulkan surface |
-| `src/render/vulkan_casino_777.hpp` | empty placeholder for the renderer |
+| `src/render/vulkan_casino_777.hpp` | header-only vulkan boilerplate (`namespace casino`): instance, device, swapchain, clear pass, frame loop |
 | `src/heck.hpp` | empty placeholder |
 
 ## style

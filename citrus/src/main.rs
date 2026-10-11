@@ -1,8 +1,13 @@
 use std::env;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::fs;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+const RED: &str = "\x1b[31m";
+const GREEN: &str = "\x1b[32m";
+const RESET: &str = "\x1b[0m";
 
 const RGFW_URL: &str = "https://github.com/ColleagueRiley/RGFW/releases/download/1.8.1/RGFW.h";
 
@@ -36,6 +41,27 @@ const SUBMODULES: &[&str] = &["luajit"];
 
 const C_UNITS: &[&str] = &["window/rgfw.c"];
 const CPP_UNITS: &[&str] = &["main.cpp", "window/rgfw_shit.cpp"];
+
+// build flags, edit them here and nowhere else
+const C_FLAGS: &[&str] = &[
+    "-std=c23",
+    "-Wall",
+    "-Wextra",
+    "-Wno-unused-result",
+    "-O2",
+    "-g",
+];
+
+const CXX_FLAGS: &[&str] = &[
+    "-std=c++23",
+    "-Wall",
+    "-Wextra",
+    "-Wno-unused-result",
+    "-O2",
+    "-g",
+];
+
+const LUAJIT_FLAGS: &[&str] = &["BUILDMODE=static", "CC=gcc -fPIC"];
 
 const LIBS: &[&str] = &[
     "vulkan",
@@ -94,8 +120,8 @@ impl Paths {
     fn build(&self) -> PathBuf {
         self.root.join("shit/build")
     }
-    fn bin(&self) -> PathBuf {
-        self.build().join("bin")
+    fn game(&self) -> PathBuf {
+        self.build().join("game")
     }
     fn obj(&self) -> PathBuf {
         self.build().join("obj")
@@ -105,6 +131,9 @@ impl Paths {
     }
     fn shaders(&self) -> PathBuf {
         self.root.join("shaders")
+    }
+    fn luascripts(&self) -> PathBuf {
+        self.root.join("src/luascripts")
     }
     fn rgfw_header(&self) -> PathBuf {
         self.external().join("RGFW.h")
@@ -121,17 +150,94 @@ impl Paths {
     fn protocols(&self) -> PathBuf {
         self.build().join("protocols")
     }
+    // -I flags, every dir a source file may include from
+    fn includes(&self) -> Vec<String> {
+        [
+            self.root.join("src"),
+            self.external(),
+            self.luajit_src(),
+            self.protocols(),
+            self.binshaders(),
+        ]
+        .iter()
+        .map(|dir| format!("-I{}", dir.display()))
+        .collect()
+    }
+    // path relative to the root, keeps progress labels short like cmake
+    fn rel(&self, path: &Path) -> String {
+        path.strip_prefix(&self.root)
+            .unwrap_or(path)
+            .display()
+            .to_string()
+    }
 }
 
 fn jobs() -> usize {
     std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
+// NO_COLOR, same convention as cmake
+fn paint(color: &str, text: &str) -> String {
+    if env::var_os("NO_COLOR").is_some() {
+        return text.to_string();
+    }
+    format!("{color}{text}{RESET}")
+}
+
+fn push_arg(line: &mut String, arg: &OsStr) {
+    let s = arg.to_string_lossy();
+    if s.is_empty() || s.contains(char::is_whitespace) {
+        line.push('"');
+        line.push_str(&s);
+        line.push('"');
+    } else {
+        line.push_str(&s);
+    }
+    line.push(' ');
+}
+
+// full copy-pasteable command line, the Debug repr of Command is not
+fn cmd_line(cmd: &Command) -> String {
+    let mut line = String::new();
+    push_arg(&mut line, cmd.get_program());
+    for arg in cmd.get_args() {
+        push_arg(&mut line, arg);
+    }
+    line.trim_end().to_string()
+}
+
+// cmake style [done/total] counter, red counter, green label
+struct Progress {
+    done: usize,
+    total: usize,
+}
+
+impl Progress {
+    fn new(total: usize) -> Self {
+        Self { done: 0, total }
+    }
+    fn step(&mut self, what: &str) {
+        self.done += 1;
+        let counter = paint(RED, &format!("[{}/{}]", self.done, self.total));
+        println!("{} {}", counter, paint(GREEN, what));
+    }
+}
+
 fn run(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
-    eprintln!("+ {:?}", cmd);
+    eprintln!("+ {}", cmd_line(cmd));
     let status = cmd.status()?;
     if !status.success() {
-        return Err(format!("command failed: {:?}", cmd).into());
+        return Err(format!("command failed: {}", cmd_line(cmd)).into());
+    }
+    Ok(())
+}
+
+// stdout of compilers is noise, warnings still reach stderr
+fn run_muted(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
+    let line = cmd_line(cmd);
+    let status = cmd.stdout(Stdio::null()).status()?;
+    if !status.success() {
+        return Err(format!("command failed: {line}").into());
     }
     Ok(())
 }
@@ -165,8 +271,7 @@ fn depmake(p: &Paths) -> Result<(), Box<dyn Error>> {
     cmd.arg("-C")
         .arg(&src)
         .arg(format!("-j{}", jobs()))
-        .arg("BUILDMODE=static")
-        .arg("CC=gcc -fPIC");
+        .args(LUAJIT_FLAGS);
     run(&mut cmd)?;
 
     if !lib.is_file() {
@@ -178,13 +283,17 @@ fn depmake(p: &Paths) -> Result<(), Box<dyn Error>> {
 
 fn depfetch(p: &Paths) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(p.external())?;
-    fs::create_dir_all(p.bin())?;
+    fs::create_dir_all(p.game())?;
     fs::create_dir_all(p.obj())?;
     fs::create_dir_all(p.binshaders())?;
 
     let rgfw = p.rgfw_header();
     if !rgfw.is_file() {
-        run(Command::new("curl").arg(RGFW_URL).arg("-L").arg("-o").arg(&rgfw))?;
+        run(Command::new("curl")
+            .arg(RGFW_URL)
+            .arg("-L")
+            .arg("-o")
+            .arg(&rgfw))?;
     } else {
         println!("RGFW.h already present");
     }
@@ -215,11 +324,30 @@ fn wayland_protocols_root() -> Result<PathBuf, Box<dyn Error>> {
     Err("wayland-protocols not found (install libwayland-dev + wayland-protocols)".into())
 }
 
-fn scan_protocols(p: &Paths) -> Result<(), Box<dyn Error>> {
-    let root = wayland_protocols_root()?;
-    let out = p.protocols();
-    fs::create_dir_all(&out)?;
+// glsl sources living in shaders/, sorted so the build order is stable
+fn shader_sources(p: &Paths) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let dir = p.shaders();
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut sources: Vec<PathBuf> = Vec::new();
+    for entry in fs::read_dir(&dir)? {
+        let path = entry?.path();
+        if matches!(
+            path.extension().and_then(|s| s.to_str()),
+            Some("vert") | Some("frag") | Some("comp")
+        ) {
+            sources.push(path);
+        }
+    }
+    sources.sort();
+    Ok(sources)
+}
 
+// xml of every protocol we need, relative to the wayland-protocols dir
+fn protocol_xmls() -> Result<Vec<(&'static str, PathBuf)>, Box<dyn Error>> {
+    let root = wayland_protocols_root()?;
+    let mut found = Vec::new();
     for (name, candidates) in PROTOCOLS {
         let mut xml = None;
         for rel in *candidates {
@@ -231,53 +359,58 @@ fn scan_protocols(p: &Paths) -> Result<(), Box<dyn Error>> {
         }
         let xml = match xml {
             Some(path) => path,
-            None => return Err(format!("wayland protocol {name} not found in {}", root.display()).into()),
+            None => {
+                return Err(
+                    format!("wayland protocol {name} not found in {}", root.display()).into(),
+                );
+            }
         };
+        found.push((*name, xml));
+    }
+    Ok(found)
+}
 
+fn scan_protocols(
+    p: &Paths,
+    protos: &[(&'static str, PathBuf)],
+    prog: &mut Progress,
+) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    let out = p.protocols();
+    fs::create_dir_all(&out)?;
+    let mut codes = Vec::new();
+
+    for (name, xml) in protos {
         let header = out.join(format!("{name}.h"));
         let code = out.join(format!("{name}-protocol.c"));
 
-        run(Command::new("wayland-scanner")
-            .arg("client-header")
-            .arg(&xml)
-            .arg(&header))?;
-        run(Command::new("wayland-scanner")
-            .arg("private-code")
-            .arg(&xml)
-            .arg(&code))?;
+        prog.step(&format!("Generating {}", p.rel(&header)));
+        let mut head = Command::new("wayland-scanner");
+        head.arg("client-header").arg(xml).arg(&header);
+        println!("{}", cmd_line(&head));
+        run_muted(&mut head)?;
 
-        println!("protocols: {name} -> {}", header.display());
+        prog.step(&format!("Generating {}", p.rel(&code)));
+        let mut body = Command::new("wayland-scanner");
+        body.arg("private-code").arg(xml).arg(&code);
+        println!("{}", cmd_line(&body));
+        run_muted(&mut body)?;
+
+        codes.push(code);
     }
 
-    Ok(())
+    Ok(codes)
 }
 
-fn shadermake(p: &Paths) -> Result<(), Box<dyn Error>> {
-    fs::create_dir_all(p.binshaders())?;
-    let shaders = p.shaders();
+fn shadermake(p: &Paths, sources: &[PathBuf], prog: &mut Progress) -> Result<(), Box<dyn Error>> {
     let out = p.binshaders();
 
-    let mut sources: Vec<PathBuf> = if shaders.is_dir() {
-        fs::read_dir(&shaders)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|f| {
-                matches!(
-                    f.extension().and_then(|s| s.to_str()),
-                    Some("vert") | Some("frag") | Some("comp")
-                )
-            })
-            .collect()
-    } else {
-        Vec::new()
-    };
-    sources.sort();
-
     if sources.is_empty() {
-        println!("shadermake: no shader sources in {}", shaders.display());
+        println!("shadermake: no shader sources in {}", p.shaders().display());
         return Ok(());
     }
+    fs::create_dir_all(&out)?;
 
-    for src in &sources {
+    for src in sources {
         let stage = match src.extension().and_then(|s| s.to_str()) {
             Some("vert") => "vert",
             Some("frag") => "frag",
@@ -287,11 +420,14 @@ fn shadermake(p: &Paths) -> Result<(), Box<dyn Error>> {
         let spv = out.join(format!("{stem}.spv"));
         let header = out.join(format!("{stem}.bin.h"));
 
-        run(Command::new("glslc")
-            .arg(format!("-fshader-stage={stage}"))
+        prog.step(&format!("Building shader object {}", p.rel(&spv)));
+        let mut cmd = Command::new("glslc");
+        cmd.arg(format!("-fshader-stage={stage}"))
             .arg(src)
             .arg("-o")
-            .arg(&spv))?;
+            .arg(&spv);
+        println!("{}", cmd_line(&cmd));
+        run_muted(&mut cmd)?;
 
         let bytes = fs::read(&spv)?;
         let mut h = String::new();
@@ -314,17 +450,45 @@ fn shadermake(p: &Paths) -> Result<(), Box<dyn Error>> {
         }
         h.push_str("};\n");
         fs::write(&header, h)?;
-        println!("shadermake: {} -> {}", src.display(), header.display());
     }
     Ok(())
 }
 
+fn copy_tree(src: &Path, dst: &Path) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_tree(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+// BLACKBOX
+fn deploy_luascripts(p: &Paths) {
+    // BLACKBOX
+    let src = p.luascripts();
+    let dst = p.game();
+    if !src.is_dir() {
+        println!("deploy: no {} to copy", src.display());
+        return;
+    }
+    if let Err(e) = copy_tree(&src, &dst) {
+        println!("deploy: {} failed: {e}", src.display());
+        return;
+    }
+    println!("deploy: {} -> {}", src.display(), dst.display());
+}
+
 fn compile(
     p: &Paths,
+    prog: &mut Progress,
     compiler: &str,
-    std: &str,
     unit: &PathBuf,
-    extra: &[String],
 ) -> Result<PathBuf, Box<dyn Error>> {
     let name = unit
         .file_name()
@@ -332,36 +496,36 @@ fn compile(
         .unwrap_or_default();
     let stem = name.split('.').next().unwrap_or("unit").to_string();
     let obj = p.obj().join(format!("{stem}.o"));
+    let is_cxx = compiler.contains("++");
+    let kind = if is_cxx { "CXX" } else { "C" };
 
-    let flags: Vec<String> = vec![
-        format!("-std={std}"),
-        "-Wall".into(),
-        "-Wextra".into(),
-        "-Wno-unused-result".into(),
-        "-O2".into(),
-        "-g".into(),
-        format!("-I{}", p.root.join("src").display()),
-        format!("-I{}", p.external().display()),
-        format!("-I{}", p.luajit_src().display()),
-        format!("-I{}", p.protocols().display()),
-        format!("-I{}", p.binshaders().display()),
-    ];
+    let mut flags: Vec<String> = if is_cxx { CXX_FLAGS } else { C_FLAGS }
+        .iter()
+        .map(|flag| flag.to_string())
+        .collect();
+    flags.extend(p.includes());
 
-    println!("compiling {name}");
-    run(Command::new(compiler)
-        .args(&flags)
-        .args(extra)
-        .arg("-c")
-        .arg(unit)
-        .arg("-o")
-        .arg(&obj))?;
+    prog.step(&format!("Building {kind} object {}", p.rel(&obj)));
+
+    let mut cmd = Command::new(compiler);
+    cmd.args(&flags).arg("-c").arg(unit).arg("-o").arg(&obj);
+    println!("{}", cmd_line(&cmd));
+    run_muted(&mut cmd)?;
 
     Ok(obj)
 }
 
 fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
-    shadermake(p)?;
-    scan_protocols(p)?;
+    let sources = shader_sources(p)?;
+    let protos = protocol_xmls()?;
+
+    // shaders + 2 wayland-scanner runs per protocol + protocol .c + units + link
+    let mut prog = Progress::new(
+        sources.len() + protos.len() * 2 + protos.len() + C_UNITS.len() + CPP_UNITS.len() + 1,
+    );
+
+    shadermake(p, &sources, &mut prog)?;
+    let codes = scan_protocols(p, &protos, &mut prog)?;
 
     let luajit = p.luajit_lib();
     if !luajit.is_file() {
@@ -369,32 +533,41 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     }
 
     fs::create_dir_all(p.obj())?;
-    fs::create_dir_all(p.bin())?;
+    fs::create_dir_all(p.game())?;
 
     let mut objs: Vec<PathBuf> = Vec::new();
 
     for unit in C_UNITS {
-        objs.push(compile(p, "gcc", "c11", &p.root.join("src").join(unit), &[])?);
+        objs.push(compile(
+            p,
+            &mut prog,
+            "gcc",
+            &p.root.join("src").join(unit),
+        )?);
     }
 
-    for entry in fs::read_dir(p.protocols())? {
-        let path = entry?.path();
-        if path.extension().and_then(|s| s.to_str()) == Some("c") {
-            objs.push(compile(p, "gcc", "c11", &path, &[])?);
-        }
+    for code in &codes {
+        objs.push(compile(p, &mut prog, "gcc", code)?);
     }
 
     for unit in CPP_UNITS {
-        objs.push(compile(p, "g++", "c++20", &p.root.join("src").join(unit), &[])?);
+        objs.push(compile(
+            p,
+            &mut prog,
+            "g++",
+            &p.root.join("src").join(unit),
+        )?);
     }
 
-    let exe = p.bin().join("nah_engine");
-    println!("linking {}", exe.display());
+    let exe = p.game().join("nah_engine");
+    prog.step(&format!("Linking CXX executable {}", p.rel(&exe)));
 
     let mut link = Command::new("g++");
     // whole-archive: lua_register pulls the C modules in by name, the linker
     // cannot see those references on its own.
-    link.arg("-Wl,--whole-archive").arg(&luajit).arg("-Wl,--no-whole-archive");
+    link.arg("-Wl,--whole-archive")
+        .arg(&luajit)
+        .arg("-Wl,--no-whole-archive");
     for obj in &objs {
         link.arg(obj);
     }
@@ -402,7 +575,10 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
         link.arg(format!("-l{lib}"));
     }
     link.arg("-o").arg(&exe);
-    run(&mut link)?;
+    println!("{}", cmd_line(&link));
+    run_muted(&mut link)?;
+
+    deploy_luascripts(p);
 
     println!("make: done -> {}", exe.display());
     Ok(())
@@ -419,8 +595,16 @@ fn main() -> Result<(), Box<dyn Error>> {
             "make" => make(&p)?,
             "depmake" => depmake(&p)?,
             "depfetch" => depfetch(&p)?,
-            "shadermake" => shadermake(&p)?,
-            "protocols" => scan_protocols(&p)?,
+            "shadermake" => {
+                let sources = shader_sources(&p)?;
+                let mut prog = Progress::new(sources.len());
+                shadermake(&p, &sources, &mut prog)?;
+            }
+            "protocols" => {
+                let protos = protocol_xmls()?;
+                let mut prog = Progress::new(protos.len() * 2);
+                scan_protocols(&p, &protos, &mut prog)?;
+            }
             "clean" => {
                 if p.build().is_dir() {
                     fs::remove_dir_all(p.build())?;

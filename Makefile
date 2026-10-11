@@ -26,7 +26,7 @@ shaders: $(CITRUS)
 	./$(CITRUS) shadermake
 
 run:
-	./shit/build/bin/nah_engine
+	./shit/build/game/nah_engine
 
 clean: $(CITRUS)
 	./$(CITRUS) clean

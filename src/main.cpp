@@ -1,6 +1,5 @@
+#include "render/vulkan_casino_777.hpp"
 #include "window/rgfw_shit.hpp"
-
-#include <stdio.h>
 
 int main() {
     if (!rgfw::init()) {
@@ -24,13 +23,16 @@ int main() {
         return 1;
     }
 
-    printf("wayland surface %p, display %p\n",
-        (void*)rgfw::getSurface(win), (void*)rgfw::getDisplay());
+    casino::InitDesc render_desc = {};
+    render_desc.win = win;
+    render_desc.app_name = "nah_engine";
+    render_desc.validation = true;
 
-    u32 extension_count = 0;
-    const char* const* extensions = rgfw::getRequiredInstanceExtensions(&extension_count);
-    for (u32 i = 0; i < extension_count; i++) {
-        printf("instance extension %u: %s\n", i, extensions[i]);
+    if (!casino::init(render_desc)) {
+        printf("vulkan init failed\n");
+        rgfw::destroyWindow(win);
+        rgfw::deinit();
+        return 1;
     }
 
     rgfw::Event event = {};
@@ -38,36 +40,22 @@ int main() {
         rgfw::waitEvent(win, 16);
 
         while (rgfw::nextEvent(&event)) {
-            i32 width = 0;
-            i32 height = 0;
-            rgfw::getSize(win, &width, &height);
-
             switch (event.kind) {
                 case rgfw::EventKind::resize:
-                    printf("resize %dx%d\n", event.width, event.height);
-                    break;
-                case rgfw::EventKind::key_pressed:
-                    printf("key %d pressed\n", (int)event.key);
-                    break;
-                case rgfw::EventKind::key_released:
-                    printf("key %d released\n", (int)event.key);
-                    break;
-                case rgfw::EventKind::mouse_pressed:
-                    printf("mouse %d pressed\n", (int)event.button);
-                    break;
-                case rgfw::EventKind::mouse_moved:
-                    printf("mouse %d,%d\n", event.mouse_x, event.mouse_y);
+                    casino::recreateSwapchain();
                     break;
                 case rgfw::EventKind::quit:
                     printf("quit\n");
                     break;
                 default:
-                    printf("event %d (%dx%d)\n", (int)event.kind, width, height);
                     break;
             }
         }
+
+        casino::drawFrame();
     }
 
+    casino::shutdown();
     rgfw::destroyWindow(win);
     rgfw::deinit();
     return 0;

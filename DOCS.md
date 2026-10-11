@@ -80,6 +80,61 @@ The engine still owns the swapchain: create it with
 recreate it on `EventKind::resize`, and flush the display after present
 (`rgfw::pollEvents` / `rgfw::waitEvent` already do `wl_display_flush`).
 
+### renderer: casino
+
+`src/render/vulkan_casino_777.hpp` is a header-only vulkan boilerplate in
+`namespace casino`, built the same way as `namespace rgfw`: one global `Context`
+that owns every handle, inline free functions, `// BLACKBOX` on `init`,
+`recreateSwapchain`, `drawFrame`. No class, no pipeline yet — the clear pass is
+the frame.
+
+what it covers, end to end:
+
+- instance with `VK_EXT_debug_utils` + `VK_LAYER_KHRONOS_validation` when present
+  (`InitDesc.validation`), errors/warnings routed to stderr
+- surface via `rgfw::createSurface`, physical device pick (discrete GPU scores
+  higher, needs graphics+present queues and `VK_KHR_swapchain`)
+- logical device, swapchain (sRGB if offered, FIFO/vsync, `minImageCount+1`)
+- swapchain image views, one color render pass, framebuffers
+- `MAX_FRAMES_IN_FLIGHT = 2`: command pool + per-frame command buffers, fences,
+  per-frame `image_available` and per-swapchain-image `render_finished` semaphores
+- `drawFrame` acquires, records a clear, submits and presents; `OUT_OF_DATE` /
+  `SUBOPTIMAL` trigger `recreateSwapchain` (also called on `EventKind::resize`)
+
+the clear color is a slow pulse so a live frame is visible without a screenshot.
+swapchain ownership now sits here, not in `main`: `casino::shutdown()` runs before
+`rgfw::destroyWindow` so the surface dies before the `wl_surface`. verified on this
+machine: RTX 3050, 1280x720, 3 images, zero validation errors.
+
+### API
+
+```c++
+#include "render/vulkan_casino_777.hpp"
+
+casino::InitDesc render_desc = {};
+render_desc.win = win;              // an RGFW_window from rgfw::createWindow
+render_desc.app_name = "nah_engine";
+render_desc.validation = true;
+
+casino::init(render_desc);
+
+while (!rgfw::shouldClose(win)) {
+    rgfw::waitEvent(win, 16);
+    while (rgfw::nextEvent(&event)) {
+        if (event.kind == rgfw::EventKind::resize)
+            casino::recreateSwapchain();
+    }
+    casino::drawFrame();
+}
+
+casino::shutdown();
+```
+
+accessors for the future pipeline work: `casino::getDevice()`,
+`getPhysicalDevice()`, `getRenderPass()`, `getExtent()`, `getGraphicsFamily()`,
+`getGraphicsQueue()`, `getCommandBuffer(frame)`.
+
+
 ### API
 
 ```c++
