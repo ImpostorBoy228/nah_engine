@@ -5,7 +5,7 @@
 | file | what |
 |---|---|
 | `Makefile` | thin wrapper over `citrus` targets: `all`, `fetch`, `depmake`, `protocols`, `shaders`, `run`, `clean` |
-| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs `glslc` on `shaders/` into spirv `.bin.h` headers, runs wayland-scanner for the wayland protocols, compiles C/C++ units (`-std=c23` / `-std=c++23`), links (`-Wl,--whole-archive` for LuaJIT, `-rdynamic` for the LuaJIT FFI), then deploys `src/luascripts` and `assets/` next to the executable; cmake-style `[n/N]` progress with a red counter and a green label, full command line printed under every step, compiler stdout muted (`NO_COLOR` disables the color) |
+| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs `glslc` on `shaders/` into spirv `.bin.h` headers, runs wayland-scanner for the wayland protocols, compiles C/C++ units (`-std=c2x` / `-std=c++2b`), links (`-Wl,--whole-archive` for LuaJIT, `-rdynamic` for the LuaJIT FFI), then deploys `src/luascripts` and `assets/` next to the executable; cmake-style `[n/N]` progress with a red counter and a green label, full command line printed under every step, compiler stdout muted (`NO_COLOR` disables the color) |
 
 ## src
 
@@ -13,7 +13,7 @@
 |---|---|
 | `src/main.cpp` | entry point, only `main()` lives here |
 | `src/window/rgfw_config.h` | the one place that decides how RGFW is configured: wayland only, no X11, vulkan pre-include |
-| `src/window/rgfw.c` | RGFW 1.8.1 implementation TU, compiled as **C** (`gcc -std=c23`), silences the debug spam |
+| `src/window/rgfw.c` | RGFW 1.8.1 implementation TU, compiled as **C** (`gcc -std=c2x`), silences the debug spam |
 | `src/window/rgfw_shit.hpp` | public windowing API of the engine (`namespace rgfw`), grouped into lifecycle / events / window state / input / vulkan |
 | `src/window/rgfw_shit.cpp` | implementation of that API: event translation, lifecycle bookkeeping, vulkan surface |
 | `src/render/vulkan_casino_777.hpp` | header-only vulkan layer (`namespace casino`): `class Device` (instance, device, swapchain, `beginFrame`/`endFrame` loop) plus RAII `Pipeline`, `GpuBuffer` and `Texture` helpers |

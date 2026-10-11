@@ -43,9 +43,11 @@ const SUBMODULES: &[&str] = &["luajit"];
 const C_UNITS: &[&str] = &["window/rgfw.c"];
 const CPP_UNITS: &[&str] = &["main.cpp", "window/rgfw_shit.cpp"];
 
-// build flags, edit them here and nowhere else
+// build flags, edit them here and nowhere else.
+// c2x / c++2b are the portable pre-finalization spellings of C23 / C++23: gcc 13
+// (the default on ubuntu-latest) rejects -std=c23 but accepts -std=c2x
 const C_FLAGS: &[&str] = &[
-    "-std=c23",
+    "-std=c2x",
     "-Wall",
     "-Wextra",
     "-Wno-unused-result",
@@ -54,7 +56,7 @@ const C_FLAGS: &[&str] = &[
 ];
 
 const CXX_FLAGS: &[&str] = &[
-    "-std=c++23",
+    "-std=c++2b",
     "-Wall",
     "-Wextra",
     "-Wno-unused-result",

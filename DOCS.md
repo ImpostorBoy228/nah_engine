@@ -252,7 +252,8 @@ libvulkan-dev`. wayland-protocols are located via
 `pkg-config --variable=pkgdatadir wayland-protocols` (with a
 `/usr/share/wayland-protocols` fallback).
 
-units are built with `-std=c23` (C) / `-std=c++23` (C++). LuaJIT lives in the
+units are built with `-std=c2x` (C) / `-std=c++2b` (C++): the portable spellings
+of C23 / C++23 that gcc 13 (the default on ubuntu-latest) accepts. LuaJIT lives in the
 `shit/external/luajit` submodule. `depmake` builds it with
 `BUILDMODE=static CC=gcc -fPIC`, so the objects can be linked into the PIE
 executable, and `make` pulls `libluajit.a` in with `-Wl,--whole-archive`:
