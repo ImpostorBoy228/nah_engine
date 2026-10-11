@@ -1,29 +1,35 @@
-DEPFETCH  := depfetch/target/release/depfetch
+CITRUS    := citrus/target/release/citrus
 RGFW_H    := shit/external/RGFW.h
+LUAJIT_A  := shit/external/luajit/src/libluajit.a
 
-all: $(DEPFETCH) $(RGFW_H)
-	./$(DEPFETCH) make
+all: $(CITRUS) $(RGFW_H) $(LUAJIT_A)
+	./$(CITRUS) make
 
-$(RGFW_H): $(DEPFETCH)
-	./$(DEPFETCH) depfetch
+$(RGFW_H): $(CITRUS)
+	./$(CITRUS) depfetch
 
-$(DEPFETCH):
-	cargo build --release --manifest-path depfetch/Cargo.toml
+$(LUAJIT_A): $(CITRUS)
+	./$(CITRUS) depmake
 
-fetch: $(DEPFETCH)
-	./$(DEPFETCH) depfetch
+$(CITRUS):
+	cargo build --release --manifest-path citrus/Cargo.toml
 
-protocols: $(DEPFETCH)
-	./$(DEPFETCH) protocols
+fetch: $(CITRUS)
+	./$(CITRUS) depfetch
 
-shaders: $(DEPFETCH)
-	./$(DEPFETCH) shadermake
+depmake: $(LUAJIT_A)
+
+protocols: $(CITRUS)
+	./$(CITRUS) protocols
+
+shaders: $(CITRUS)
+	./$(CITRUS) shadermake
 
 run:
 	./shit/build/bin/nah_engine
 
-clean: $(DEPFETCH)
-	./$(DEPFETCH) clean
+clean: $(CITRUS)
+	./$(CITRUS) clean
 
-.PHONY: all fetch protocols shaders clean
+.PHONY: all fetch depmake protocols shaders clean
 .NOTPARALLEL:

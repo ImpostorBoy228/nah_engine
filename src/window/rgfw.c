@@ -2,19 +2,17 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
 
-/* RGFW_WAYLAND hard-defines RGFW_DEBUG, which printf()s every internal step.
-   RGFW_PRINTF is the only sink it uses, so hijack it and drop the info spam
-   while keeping errors and warnings on stderr. Every message is followed by a
-   bare RGFW_PRINTF("\n"), so print the line break here instead. */
+// RGFW_WAYLAND hard-defines RGFW_DEBUG, which printf()s every internal step
+// hijack RGFW_PRINTF, the only sink it uses, and drop the "RGFW I..." spam
+// every message is followed by a bare RGFW_PRINTF("\n"), so print it here
 static void rgfw_log(const char* fmt, ...) {
     if (fmt[0] == '\n' && fmt[1] == '\0')
         return;
 
-    if (fmt[0] == 'R' && fmt[1] == 'G' && fmt[2] == 'F' && fmt[3] == 'W'
-        && fmt[4] == ' ' && fmt[5] == 'I') {
+    if (strncmp(fmt, "RGFW I", 6) == 0)
         return;
-    }
 
     va_list args;
     va_start(args, fmt);

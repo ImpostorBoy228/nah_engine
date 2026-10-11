@@ -1,2 +1,5 @@
-/depfetch/target/
-/shit/
+/citrus/target/
+/shit/*
+!/shit/external
+/shit/external/*
+!/shit/external/luajit

@@ -6,13 +6,13 @@
 namespace rgfw {
 
     static const u32 MAX_QUEUED_EVENTS = 256;
+    static_assert((MAX_QUEUED_EVENTS & (MAX_QUEUED_EVENTS - 1)) == 0, "must stay a power of two");
 
     static Event queued_events[MAX_QUEUED_EVENTS];
     static u32 queued_head = 0;
     static u32 queued_count = 0;
 
-    /* RGFW tears the platform down by itself when the last window closes, and
-       RGFW_deinit is not idempotent, so the lifecycle is tracked here */
+    // RGFW deinits itself on last window close and RGFW_deinit is not idempotent
     static bool started = false;
     static u32 alive_windows = 0;
 
@@ -20,7 +20,7 @@ namespace rgfw {
         if (queued_count == MAX_QUEUED_EVENTS)
             return;
 
-        u32 slot = (queued_head + queued_count) % MAX_QUEUED_EVENTS;
+        u32 slot = (queued_head + queued_count) & (MAX_QUEUED_EVENTS - 1);
         queued_events[slot] = *event;
         queued_count += 1;
     }
@@ -29,22 +29,12 @@ namespace rgfw {
         RGFW_event raw;
 
         while (RGFW_window_checkQueuedEvent(win, &raw)) {
+            // {} zeroes everything, only the non zero defaults are set below
             Event event = {};
             event.win = win;
             event.kind = EventKind::none;
             event.key = RGFW_keyNULL;
-            event.mods = 0;
-            event.key_char = 0;
-            event.repeat = false;
-            event.mouse_x = 0;
-            event.mouse_y = 0;
             event.button = RGFW_mouseLeft;
-            event.scroll_x = 0.0f;
-            event.scroll_y = 0.0f;
-            event.x = 0;
-            event.y = 0;
-            event.width = 0;
-            event.height = 0;
             event.scale_x = 1.0f;
             event.scale_y = 1.0f;
 
@@ -86,12 +76,12 @@ namespace rgfw {
                     break;
                 case RGFW_mouseButtonPressed:
                     event.kind = EventKind::mouse_pressed;
-                    event.button = (MouseButton)raw.button.value;
+                    event.button = static_cast<MouseButton>(raw.button.value);
                     RGFW_window_getMouse(win, &event.mouse_x, &event.mouse_y);
                     break;
                 case RGFW_mouseButtonReleased:
                     event.kind = EventKind::mouse_released;
-                    event.button = (MouseButton)raw.button.value;
+                    event.button = static_cast<MouseButton>(raw.button.value);
                     RGFW_window_getMouse(win, &event.mouse_x, &event.mouse_y);
                     break;
                 case RGFW_mousePosChanged:
@@ -159,7 +149,7 @@ namespace rgfw {
         if (!started)
             return NULL;
 
-        RGFW_windowFlags flags = (RGFW_windowFlags)0;
+        RGFW_windowFlags flags = static_cast<RGFW_windowFlags>(0);
 
         if (!desc.resizable)
             flags |= RGFW_windowNoResize;
@@ -226,7 +216,7 @@ namespace rgfw {
             return false;
 
         *out = queued_events[queued_head];
-        queued_head = (queued_head + 1) % MAX_QUEUED_EVENTS;
+        queued_head = (queued_head + 1) & (MAX_QUEUED_EVENTS - 1);
         queued_count -= 1;
         return true;
     }
@@ -273,7 +263,13 @@ namespace rgfw {
         RGFW_window_setExitKey(win, key);
     }
 
-    bool setIcon(RGFW_window* win, u8* pixels, i32 width, i32 height, RGFW_format format) {
+    bool setIcon(
+        RGFW_window* win,
+        u8* pixels,
+        i32 width,
+        i32 height,
+        RGFW_format format
+        ) {
         if (win == NULL || pixels == NULL)
             return false;
 
@@ -360,7 +356,11 @@ namespace rgfw {
         return extensions;
     }
 
-    VkResult createSurface(RGFW_window* win, VkInstance instance, VkSurfaceKHR* surface) {
+    VkResult createSurface(
+        RGFW_window* win,
+        VkInstance instance,
+        VkSurfaceKHR* surface
+        ) {
         if (win == NULL || surface == NULL)
             return VK_ERROR_INITIALIZATION_FAILED;
 

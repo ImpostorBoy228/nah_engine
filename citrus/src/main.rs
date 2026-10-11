@@ -31,6 +31,9 @@ const PROTOCOLS: &[(&str, &[&str])] = &[
     ),
 ];
 
+// git submodules living in the external dir, they are fetched with git, not curl
+const SUBMODULES: &[&str] = &["luajit"];
+
 const C_UNITS: &[&str] = &["window/rgfw.c"];
 const CPP_UNITS: &[&str] = &["main.cpp", "window/rgfw_shit.cpp"];
 
@@ -106,9 +109,22 @@ impl Paths {
     fn rgfw_header(&self) -> PathBuf {
         self.external().join("RGFW.h")
     }
+    fn submodule(&self, name: &str) -> PathBuf {
+        self.external().join(name)
+    }
+    fn luajit_src(&self) -> PathBuf {
+        self.submodule("luajit").join("src")
+    }
+    fn luajit_lib(&self) -> PathBuf {
+        self.luajit_src().join("libluajit.a")
+    }
     fn protocols(&self) -> PathBuf {
         self.build().join("protocols")
     }
+}
+
+fn jobs() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 fn run(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
@@ -117,6 +133,46 @@ fn run(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
     if !status.success() {
         return Err(format!("command failed: {:?}", cmd).into());
     }
+    Ok(())
+}
+
+fn fetch_submodules(p: &Paths) -> Result<(), Box<dyn Error>> {
+    let fresh = SUBMODULES
+        .iter()
+        .any(|name| !p.submodule(name).join(".git").exists());
+
+    // NOTE: `git submodule --init` is invalid (init is a subcommand of update).
+    let mut cmd = Command::new("git");
+    cmd.arg("submodule").arg("update");
+    if fresh {
+        cmd.arg("--init").arg("--recursive");
+    } else {
+        cmd.arg("--remote").arg("--merge");
+    }
+    cmd.current_dir(&p.root);
+    run(&mut cmd)
+}
+
+fn depmake(p: &Paths) -> Result<(), Box<dyn Error>> {
+    let src = p.luajit_src();
+    if !src.is_dir() {
+        return Err(format!("luajit submodule missing at {}", src.display()).into());
+    }
+    let lib = p.luajit_lib();
+
+    // BUILDMODE=static builds only libluajit.a
+    let mut cmd = Command::new("make");
+    cmd.arg("-C")
+        .arg(&src)
+        .arg(format!("-j{}", jobs()))
+        .arg("BUILDMODE=static")
+        .arg("CC=gcc -fPIC");
+    run(&mut cmd)?;
+
+    if !lib.is_file() {
+        return Err(format!("luajit build produced no {}", lib.display()).into());
+    }
+    println!("depmake: {} -> {}", src.display(), lib.display());
     Ok(())
 }
 
@@ -134,6 +190,7 @@ fn depfetch(p: &Paths) -> Result<(), Box<dyn Error>> {
     }
 
     println!("project root: {}", p.root.display());
+    fetch_submodules(p)?;
     println!("depfetch: ok");
     Ok(())
 }
@@ -285,6 +342,7 @@ fn compile(
         "-g".into(),
         format!("-I{}", p.root.join("src").display()),
         format!("-I{}", p.external().display()),
+        format!("-I{}", p.luajit_src().display()),
         format!("-I{}", p.protocols().display()),
         format!("-I{}", p.binshaders().display()),
     ];
@@ -304,6 +362,11 @@ fn compile(
 fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     shadermake(p)?;
     scan_protocols(p)?;
+
+    let luajit = p.luajit_lib();
+    if !luajit.is_file() {
+        return Err(format!("{} missing, run depmake", luajit.display()).into());
+    }
 
     fs::create_dir_all(p.obj())?;
     fs::create_dir_all(p.bin())?;
@@ -329,6 +392,9 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     println!("linking {}", exe.display());
 
     let mut link = Command::new("g++");
+    // whole-archive: lua_register pulls the C modules in by name, the linker
+    // cannot see those references on its own.
+    link.arg("-Wl,--whole-archive").arg(&luajit).arg("-Wl,--no-whole-archive");
     for obj in &objs {
         link.arg(obj);
     }
@@ -351,6 +417,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         match args[1].as_str() {
             "make" => make(&p)?,
+            "depmake" => depmake(&p)?,
             "depfetch" => depfetch(&p)?,
             "shadermake" => shadermake(&p)?,
             "protocols" => scan_protocols(&p)?,
@@ -362,7 +429,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             other => {
                 eprintln!("unknown command: {other}");
-                eprintln!("usage: depfetch [make|depfetch|shadermake|protocols|clean]");
+                eprintln!("usage: citrus [make|depmake|depfetch|shadermake|protocols|clean]");
                 std::process::exit(2);
             }
         }

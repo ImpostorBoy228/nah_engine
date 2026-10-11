@@ -63,15 +63,21 @@ namespace rgfw {
         bool exit_on_escape;
     };
 
+    // lifecycle
+
     bool init(); // BLACKBOX
     void deinit();
 
     RGFW_window* createWindow(const WindowDesc& desc); // BLACKBOX
     void destroyWindow(RGFW_window* win);
 
+    // events
+
     void pollEvents(RGFW_window* win); // BLACKBOX
     void waitEvent(RGFW_window* win, i32 timeout_ms); // BLACKBOX
     bool nextEvent(Event* out);
+
+    // window state
 
     bool shouldClose(RGFW_window* win);
     void setShouldClose(RGFW_window* win, bool value);
@@ -80,11 +86,19 @@ namespace rgfw {
     void setTitle(RGFW_window* win, const char* title);
     void setMinSize(RGFW_window* win, i32 width, i32 height);
     void setExitKey(RGFW_window* win, Key key);
-    bool setIcon(RGFW_window* win, u8* pixels, i32 width, i32 height, RGFW_format format);
+    bool setIcon(
+        RGFW_window* win,
+        u8* pixels,
+        i32 width,
+        i32 height,
+        RGFW_format format
+        );
 
     bool isFocused(RGFW_window* win);
     bool isMinimized(RGFW_window* win);
     bool isMaximized(RGFW_window* win);
+
+    // input state
 
     bool isKeyDown(RGFW_window* win, Key key);
     bool isKeyPressed(RGFW_window* win, Key key);
@@ -92,11 +106,17 @@ namespace rgfw {
     bool isMouseButtonDown(RGFW_window* win, MouseButton button);
     void getMousePos(RGFW_window* win, i32* x, i32* y);
 
+    // vulkan
+
     struct wl_display* getDisplay();
     struct wl_surface* getSurface(RGFW_window* win);
 
     const char* const* getRequiredInstanceExtensions(u32* count);
-    VkResult createSurface(RGFW_window* win, VkInstance instance, VkSurfaceKHR* surface);
+    VkResult createSurface(
+        RGFW_window* win,
+        VkInstance instance,
+        VkSurfaceKHR* surface
+        );
 
 } // namespace rgfw
 
