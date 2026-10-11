@@ -7,13 +7,13 @@ on:
     branches: [ "main" ]
 
 jobs:
-  nah:
+  build:
     runs-on: ubuntu-latest
 
     steps:
+    # no submodules here: luajit.org is dumb http and rejects shallow clones, so
+    # citrus depfetch does the full `git submodule update --init` itself
     - uses: actions/checkout@v4
-      with:
-        submodules: recursive
 
     - name: deps
       run: |
