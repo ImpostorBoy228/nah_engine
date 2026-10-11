@@ -4,3 +4,4 @@
 !/shit/external
 /shit/external/*
 !/shit/external/luajit
+.cache
