@@ -4,7 +4,7 @@
 4. main.cpp contains no functions exept main()
 5. INDEX.md is description of code files
 6. DOCS.md is code docs
-7. comments are only ```//``` . no ```/*``` or ```///```. short, understandable comments only then needed
+7. comments are only ```//``` . no ```/*``` or ```///```. short, understandable, oneline comments only then needed
 
 ## code style
 #### functions:

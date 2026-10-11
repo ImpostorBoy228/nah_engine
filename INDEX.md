@@ -5,7 +5,7 @@
 | file | what |
 |---|---|
 | `Makefile` | thin wrapper over `citrus` targets: `all`, `fetch`, `depmake`, `protocols`, `shaders`, `run`, `clean` |
-| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs wayland-scanner for the wayland protocols, compiles C/C++ units, links; cmake-style `[n/N]` progress with a red counter and a green label, full command line printed under every step, compiler stdout muted (`NO_COLOR` disables the color) |
+| `citrus/src/main.rs` | the whole build system: fetches RGFW.h, syncs git submodules, builds LuaJIT as a static lib, runs `glslc` on `shaders/` into spirv `.bin.h` headers, runs wayland-scanner for the wayland protocols, compiles C/C++ units (`-std=c23` / `-std=c++23`), links (`-Wl,--whole-archive` for LuaJIT, `-rdynamic` for the LuaJIT FFI), then deploys `src/luascripts` and `assets/` next to the executable; cmake-style `[n/N]` progress with a red counter and a green label, full command line printed under every step, compiler stdout muted (`NO_COLOR` disables the color) |
 
 ## src
 
@@ -13,11 +13,22 @@
 |---|---|
 | `src/main.cpp` | entry point, only `main()` lives here |
 | `src/window/rgfw_config.h` | the one place that decides how RGFW is configured: wayland only, no X11, vulkan pre-include |
-| `src/window/rgfw.c` | RGFW 1.8.1 implementation TU, compiled as **C** (`gcc -std=c11`), silences the debug spam |
+| `src/window/rgfw.c` | RGFW 1.8.1 implementation TU, compiled as **C** (`gcc -std=c23`), silences the debug spam |
 | `src/window/rgfw_shit.hpp` | public windowing API of the engine (`namespace rgfw`), grouped into lifecycle / events / window state / input / vulkan |
 | `src/window/rgfw_shit.cpp` | implementation of that API: event translation, lifecycle bookkeeping, vulkan surface |
-| `src/render/vulkan_casino_777.hpp` | header-only vulkan boilerplate (`namespace casino`): instance, device, swapchain, clear pass, frame loop |
-| `src/heck.hpp` | empty placeholder |
+| `src/render/vulkan_casino_777.hpp` | header-only vulkan layer (`namespace casino`): `class Device` (instance, device, swapchain, `beginFrame`/`endFrame` loop) plus RAII `Pipeline`, `GpuBuffer` and `Texture` helpers |
+| `src/render/primitives.hpp` | header-only 2d batcher (`namespace prim`, `class Primitives`): rects, triangles and images in relative coords, one pipeline, texture batching |
+| `src/render/image.hpp` | header-only dependency-free PNG loader (`namespace img`): hand-written inflate + filters, decodes to rgba8 |
+| `src/paths.hpp` | resolves asset/script paths relative to the executable (`namespace paths`), so the game runs from any cwd |
+| `src/ligma.hpp` | thin LuaJIT wrapper (`class Ligma`) plus a small `GachiMan` C API that `main.lua` calls through the FFI |
+
+## assets + shaders
+
+| file | what |
+|---|---|
+| `shaders/prim.vert`, `shaders/prim.frag` | GLSL 450 sources for the 2d pipeline, compiled by `make shaders` into `shit/build/binshaders/*.bin.h` |
+| `src/luascripts/main.lua` | LuaJIT script run at startup, drives the `GachiMan` C API via `ffi.C` |
+| `assets/` | runtime assets (e.g. `uv.png`), copied into `<game>/assets/` on build |
 
 ## style
 
@@ -28,6 +39,6 @@ the window code is the reference for the rules in `AGENTS.md`:
 - functions: snake_case arguments, a signature that does not fit in 80 columns gets one argument per
   line, closing paren on its own line
 - structs and `enum class`: first letter uppercase
-- classes would be camelCase and are only defined in `.hpp` files (the window layer is namespace +
-  free functions on purpose, so there is no class to follow the rule with)
+- classes are camelCase and only defined in `.hpp` files (the renderer and primitives layers use
+  `casino::Device` / `prim::Primitives`, the window layer is namespace + free functions on purpose)
 - `// BLACKBOX` marks the public functions that hide real work

@@ -1,4 +1,5 @@
 /citrus/target/
+/compile_commands.json
 /shit/*
 !/shit/external
 /shit/external/*

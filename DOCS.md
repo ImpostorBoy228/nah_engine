@@ -4,7 +4,7 @@
 
 The engine window layer is wayland only. X11 and the XWayland fallback are gone:
 there is no `Xlib.h` anywhere in the include graph and the linked binary has zero
-X11/xcb dependencies (check with `ldd shit/build/bin/nah_engine`).
+X11/xcb dependencies (check with `ldd shit/build/game/nah_engine`).
 
 ### how it is put together
 
@@ -82,13 +82,10 @@ recreate it on `EventKind::resize`, and flush the display after present
 
 ### renderer: casino
 
-`src/render/vulkan_casino_777.hpp` is a header-only vulkan boilerplate in
-`namespace casino`, built the same way as `namespace rgfw`: one global `Context`
-that owns every handle, inline free functions, `// BLACKBOX` on `init`,
-`recreateSwapchain`, `drawFrame`. No class, no pipeline yet — the clear pass is
-the frame.
-
-what it covers, end to end:
+`src/render/vulkan_casino_777.hpp` is a header-only vulkan layer in
+`namespace casino`. It knows nothing about 2d, that lives in
+`render/primitives.hpp`. The core is a `class Device` (RAII, not copyable,
+destructor tears it down) that owns every handle end to end:
 
 - instance with `VK_EXT_debug_utils` + `VK_LAYER_KHRONOS_validation` when present
   (`InitDesc.validation`), errors/warnings routed to stderr
@@ -98,12 +95,18 @@ what it covers, end to end:
 - swapchain image views, one color render pass, framebuffers
 - `MAX_FRAMES_IN_FLIGHT = 2`: command pool + per-frame command buffers, fences,
   per-frame `image_available` and per-swapchain-image `render_finished` semaphores
-- `drawFrame` acquires, records a clear, submits and presents; `OUT_OF_DATE` /
-  `SUBOPTIMAL` trigger `recreateSwapchain` (also called on `EventKind::resize`)
+- `beginFrame` waits the fence, acquires an image, begins the render pass and
+  sets viewport + scissor; `endFrame` ends the pass, submits and presents.
+  `OUT_OF_DATE` / `SUBOPTIMAL` trigger `recreateSwapchain` (also called on
+  `EventKind::resize`)
 
-the clear color is a slow pulse so a live frame is visible without a screenshot.
-swapchain ownership now sits here, not in `main`: `casino::shutdown()` runs before
-`rgfw::destroyWindow` so the surface dies before the `wl_surface`. verified on this
+`// BLACKBOX` marks `init`, `recreateSwapchain`, `beginFrame`, `endFrame`. The
+clear color is fixed `{ 0.08, 0.08, 0.10, 1.0 }`, the 2d layer draws on top.
+
+reusable RAII helpers live here too: `casino::Pipeline` (graphics pipeline over
+the device render pass, spirv vertex + fragment), `casino::GpuBuffer` (device
+local, host visible or staging), `casino::Texture` (image + view + sampler +
+descriptor set, uploaded through a one-shot command buffer). verified on this
 machine: RTX 3050, 1280x720, 3 images, zero validation errors.
 
 ### API
@@ -111,31 +114,89 @@ machine: RTX 3050, 1280x720, 3 images, zero validation errors.
 ```c++
 #include "render/vulkan_casino_777.hpp"
 
+casino::Device device;
 casino::InitDesc render_desc = {};
 render_desc.win = win;              // an RGFW_window from rgfw::createWindow
 render_desc.app_name = "nah_engine";
 render_desc.validation = true;
 
-casino::init(render_desc);
+if (!device.init(render_desc))
+    return 1;
 
 while (!rgfw::shouldClose(win)) {
     rgfw::waitEvent(win, 16);
     while (rgfw::nextEvent(&event)) {
         if (event.kind == rgfw::EventKind::resize)
-            casino::recreateSwapchain();
+            device.recreateSwapchain();
     }
-    casino::drawFrame();
+
+    if (!device.beginFrame())
+        continue;
+
+    /* draw here: device.currentCommand(), device.frameSlot(), device.currentExtent() */
+
+    device.endFrame();
 }
 
-casino::shutdown();
+device.shutdown();                   // runs before rgfw::destroyWindow
 ```
 
-accessors for the future pipeline work: `casino::getDevice()`,
-`getPhysicalDevice()`, `getRenderPass()`, `getExtent()`, `getGraphicsFamily()`,
-`getGraphicsQueue()`, `getCommandBuffer(frame)`.
+accessors: `frameSlot()`, `currentCommand()`, `currentIndex()`,
+`currentExtent()`, `currentRenderPass()`. The handles are public members
+(`device`, `gpu`, `graphics_queue`, `command_pool`, ...) so the 2d layer can
+create its own buffers, pipelines and descriptor sets.
 
+### renderer: primitives
 
-### API
+`src/render/primitives.hpp` (`namespace prim`) is a 2d immediate-mode batcher on
+top of `casino::Device`. Coordinates are relative: `(0,0)` top-left, `(1,1)`
+bottom-right, y-down. One pipeline (vertex color * texture), a white 1x1 texture
+stands in for untextured prims. `// BLACKBOX` on `init`, `createTexture`,
+`loadTexture`.
+
+- `drawRect`, `drawTriangle`, `drawImage` push vertices into a flat array
+- verts are grouped into batches by descriptor set (one batch per texture),
+  `render` copies the array into the frame's host-visible vertex buffer and
+  issues one `vkCmdDraw` per batch
+- `MAX_VERTS = 65536`, `MAX_TEXTURES = 128`; an overflow drops the vertex
+
+```c++
+prim::Primitives prims;
+prims.init(device);
+casino::Texture uv;
+prims.loadTexture(&uv, "assets/uv.png");
+
+prims.begin();
+prims.drawRect(0.05f, 0.25f, 0.25f, 0.25f, prim::rgba(0.90f, 0.25f, 0.35f, 1.0f));
+prims.drawImage(uv, x, y, w, h);
+prims.render(device.currentCommand(), device.frameSlot());
+```
+
+### renderer: image
+
+`src/render/image.hpp` (`namespace img`) is a minimal dependency-free PNG
+loader: 8-bit gray/rgb/graya/rgba, non-interlaced, inflated by a hand-written
+inflate (bit reader, canonical huffman, LZ77 back-refs, the five PNG filters)
+and expanded to rgba8. `img::loadPng` reads the file, `img::freeImage` releases
+the `malloc`ed pixels. Unsupported files are reported to stderr and rejected.
+
+### assets + scripts
+
+`src/paths.hpp` (`namespace paths`) resolves asset and script paths relative to
+the executable (`/proc/self/exe` + `dirname`), not the cwd, so the game runs from
+any launcher or working directory. Absolute paths pass through, a missing
+`/proc` falls back to the cwd. `// BLACKBOX` on `resolve`.
+
+`src/ligma.hpp` is a thin `class Ligma` LuaJIT wrapper: `ligma_execute` runs a
+script, the constructor opens the standard libs, the destructor closes the
+state. It also exposes a small C API (`gachicreate` / `gachicum` / `gachiprint`
+on a `GachiMan` struct) that `main.lua` calls through the LuaJIT FFI. For
+`ffi.C` to resolve those symbols the binary is linked with `-rdynamic`.
+
+the script (`src/luascripts/main.lua`) is deployed next to the executable and
+`assets/` into `<game>/assets/`, both picked up by `paths::resolve` at runtime.
+
+### windowing API
 
 ```c++
 #include "window/rgfw_shit.hpp"
@@ -172,19 +233,29 @@ input state is also queryable directly: `rgfw::isKeyDown`, `rgfw::isKeyPressed`,
 ### building
 
 ```
-make          # depfetch + depmake + protocols + compile + link
+make          # shaders + protocols + compile + link, then deploy scripts + assets
 make fetch    # RGFW.h + git submodules
 make depmake  # LuaJIT static lib
 make protocols
-make run
+make shaders  # glslc compiles shaders/ into spirv .bin.h headers
+make run      # runs shit/build/game/nah_engine
 make clean
 ```
 
-needs `gcc g++ make libwayland-dev wayland-protocols libxkbcommon-dev libvulkan-dev`.
-wayland-protocols are located via `pkg-config --variable=pkgdatadir wayland-protocols`.
+`make` runs `shadermake` (`glslc` on `shaders/*.vert|frag|comp` into
+`shit/build/binshaders/*.bin.h`, spirv baked as a `static const uint8_t` array),
+`protocols`, the C/C++ units, the link, then deploys `src/luascripts` next to the
+executable and `assets/` into `<game>/assets/`.
 
-LuaJIT lives in the `shit/external/luajit` submodule. `depmake` builds it with
+needs `gcc g++ glslc make libwayland-dev wayland-protocols libxkbcommon-dev
+libvulkan-dev`. wayland-protocols are located via
+`pkg-config --variable=pkgdatadir wayland-protocols` (with a
+`/usr/share/wayland-protocols` fallback).
+
+units are built with `-std=c23` (C) / `-std=c++23` (C++). LuaJIT lives in the
+`shit/external/luajit` submodule. `depmake` builds it with
 `BUILDMODE=static CC=gcc -fPIC`, so the objects can be linked into the PIE
 executable, and `make` pulls `libluajit.a` in with `-Wl,--whole-archive`:
 `luaL_openlibs` registers the C modules by name, so the linker would otherwise
-drop most of the archive.
+drop most of the archive. The link also passes `-rdynamic` so the LuaJIT FFI can
+`dlsym` the `GachiMan` C API out of the main executable.

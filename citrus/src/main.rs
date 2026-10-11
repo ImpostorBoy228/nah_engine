@@ -4,6 +4,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::SystemTime;
 
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
@@ -11,7 +12,7 @@ const RESET: &str = "\x1b[0m";
 
 const RGFW_URL: &str = "https://github.com/ColleagueRiley/RGFW/releases/download/1.8.1/RGFW.h";
 
-/* every wayland protocol RGFW.h includes, relative to the wayland-protocols dir */
+// every wayland protocol RGFW.h includes, relative to the wayland-protocols dir
 const PROTOCOLS: &[(&str, &[&str])] = &[
     ("xdg-shell", &["stable/xdg-shell/xdg-shell.xml"]),
     (
@@ -135,6 +136,9 @@ impl Paths {
     fn luascripts(&self) -> PathBuf {
         self.root.join("src/luascripts")
     }
+    fn assets(&self) -> PathBuf {
+        self.root.join("assets")
+    }
     fn rgfw_header(&self) -> PathBuf {
         self.external().join("RGFW.h")
     }
@@ -240,6 +244,71 @@ fn run_muted(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
         return Err(format!("command failed: {line}").into());
     }
     Ok(())
+}
+
+// mtime of a file, None if missing, so a missing output always counts as stale
+fn mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+// is src newer than dst. a missing dst is always stale
+fn is_newer(src: &Path, dst: &Path) -> bool {
+    match (mtime(src), mtime(dst)) {
+        (Some(s), Some(d)) => s > d,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+// prerequisites (sources + headers) listed in a gcc -MMD depfile, paths only
+fn dep_prereqs(dep: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read_to_string(dep) else {
+        return Vec::new();
+    };
+    // join backslash-newline line continuations into a single space
+    let joined = text.replace("\\\r\n", " ").replace("\\\n", " ");
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut chars = joined.chars().peekable();
+    let mut seen_target = false;
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                // escaped char (e.g. a space in a path), take the next one literally
+                if let Some(&n) = chars.peek() {
+                    cur.push(n);
+                    chars.next();
+                }
+            }
+            ' ' | '\t' | '\n' | '\r' => {
+                if !cur.is_empty() {
+                    // first token is the target, -MP phony targets end with ':'
+                    if seen_target && !cur.ends_with(':') {
+                        out.push(PathBuf::from(&cur));
+                    }
+                    seen_target = true;
+                    cur.clear();
+                }
+            }
+            _ => cur.push(c),
+        }
+    }
+    if !cur.is_empty() && seen_target && !cur.ends_with(':') {
+        out.push(PathBuf::from(&cur));
+    }
+    out
+}
+
+// is the object stale: missing, older than its source, or older than any header.
+// a missing depfile counts as stale so the header deps get captured on the first run
+fn obj_stale(obj: &Path, dep: &Path, source: &Path) -> bool {
+    if mtime(obj).is_none() || mtime(dep).is_none() {
+        return true;
+    }
+    if is_newer(source, obj) {
+        return true;
+    }
+    dep_prereqs(dep).iter().any(|pre| is_newer(pre, obj))
 }
 
 fn fetch_submodules(p: &Paths) -> Result<(), Box<dyn Error>> {
@@ -383,17 +452,26 @@ fn scan_protocols(
         let header = out.join(format!("{name}.h"));
         let code = out.join(format!("{name}-protocol.c"));
 
-        prog.step(&format!("Generating {}", p.rel(&header)));
-        let mut head = Command::new("wayland-scanner");
-        head.arg("client-header").arg(xml).arg(&header);
-        println!("{}", cmd_line(&head));
-        run_muted(&mut head)?;
+        // regenerate only when the protocol xml changed
+        if is_newer(xml, &header) || mtime(&header).is_none() {
+            prog.step(&format!("Generating {}", p.rel(&header)));
+            let mut head = Command::new("wayland-scanner");
+            head.arg("client-header").arg(xml).arg(&header);
+            println!("{}", cmd_line(&head));
+            run_muted(&mut head)?;
+        } else {
+            prog.step(&format!("Up-to-date {}", p.rel(&header)));
+        }
 
-        prog.step(&format!("Generating {}", p.rel(&code)));
-        let mut body = Command::new("wayland-scanner");
-        body.arg("private-code").arg(xml).arg(&code);
-        println!("{}", cmd_line(&body));
-        run_muted(&mut body)?;
+        if is_newer(xml, &code) || mtime(&code).is_none() {
+            prog.step(&format!("Generating {}", p.rel(&code)));
+            let mut body = Command::new("wayland-scanner");
+            body.arg("private-code").arg(xml).arg(&code);
+            println!("{}", cmd_line(&body));
+            run_muted(&mut body)?;
+        } else {
+            prog.step(&format!("Up-to-date {}", p.rel(&code)));
+        }
 
         codes.push(code);
     }
@@ -416,18 +494,30 @@ fn shadermake(p: &Paths, sources: &[PathBuf], prog: &mut Progress) -> Result<(),
             Some("frag") => "frag",
             _ => "comp",
         };
-        let stem = src.file_stem().unwrap().to_string_lossy().to_string();
+        let file_stem = src.file_stem().unwrap().to_string_lossy().to_string();
+        // stage in the stem: prim.vert and prim.frag would both be prim.bin.h otherwise
+        let stem = format!("{file_stem}_{stage}");
         let spv = out.join(format!("{stem}.spv"));
         let header = out.join(format!("{stem}.bin.h"));
 
-        prog.step(&format!("Building shader object {}", p.rel(&spv)));
-        let mut cmd = Command::new("glslc");
-        cmd.arg(format!("-fshader-stage={stage}"))
-            .arg(src)
-            .arg("-o")
-            .arg(&spv);
-        println!("{}", cmd_line(&cmd));
-        run_muted(&mut cmd)?;
+        // recompile only when the glsl source changed; regenerate the header only
+        // when the spv did (glslc output is byte-stable, so mtime is enough)
+        if is_newer(src, &spv) || mtime(&spv).is_none() {
+            prog.step(&format!("Building shader object {}", p.rel(&spv)));
+            let mut cmd = Command::new("glslc");
+            cmd.arg(format!("-fshader-stage={stage}"))
+                .arg(src)
+                .arg("-o")
+                .arg(&spv);
+            println!("{}", cmd_line(&cmd));
+            run_muted(&mut cmd)?;
+        } else {
+            prog.step(&format!("Up-to-date shader object {}", p.rel(&spv)));
+        }
+
+        if !is_newer(&spv, &header) && mtime(&header).is_some() {
+            continue;
+        }
 
         let bytes = fs::read(&spv)?;
         let mut h = String::new();
@@ -461,7 +551,8 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), Box<dyn Error>> {
         let to = dst.join(entry.file_name());
         if entry.path().is_dir() {
             copy_tree(&entry.path(), &to)?;
-        } else {
+        } else if is_newer(&entry.path(), &to) {
+            // skip the copy when the destination is already up to date
             fs::copy(entry.path(), &to)?;
         }
     }
@@ -484,35 +575,132 @@ fn deploy_luascripts(p: &Paths) {
     println!("deploy: {} -> {}", src.display(), dst.display());
 }
 
+// BLACKBOX
+fn deploy_assets(p: &Paths) {
+    // BLACKBOX
+    let src = p.assets();
+    let dst = p.game().join("assets");
+    if !src.is_dir() {
+        println!("deploy: no {} to copy", src.display());
+        return;
+    }
+    if let Err(e) = copy_tree(&src, &dst) {
+        println!("deploy: {} failed: {e}", src.display());
+        return;
+    }
+    println!("deploy: {} -> {}", src.display(), dst.display());
+}
+
+// json string escaping, paths only but quotes happen
+fn json_str(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// headers clangd must be able to open on their own, they are not compiled
+fn src_headers(p: &Paths) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![p.root.join("src")];
+    while let Some(dir) = stack.pop() {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            match path.extension().and_then(|s| s.to_str()) {
+                Some("h") | Some("hpp") => out.push(path),
+                _ => {}
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+// compile_commands.json, clangd and every other editor reads it from the root.
+// paths are absolute so nothing depends on the reader cwd.
+fn compdb(p: &Paths, units: &[(PathBuf, bool)]) -> Result<(), Box<dyn Error>> {
+    let mut out = String::from("[\n");
+    for (i, (unit, is_cxx)) in units.iter().enumerate() {
+        let mut args: Vec<String> = vec![if *is_cxx { "g++" } else { "gcc" }.to_string()];
+        args.extend(compile_flags(p, *is_cxx));
+        args.push(unit.display().to_string());
+
+        let mut entry = format!("  {{\n    \"directory\": \"{}\",\n", json_str(&p.root.display().to_string()));
+        entry.push_str(&format!("    \"file\": \"{}\",\n", json_str(&unit.display().to_string())));
+        entry.push_str("    \"arguments\": [\n");
+        let args: Vec<String> = args
+            .iter()
+            .map(|arg| format!("      \"{}\"", json_str(arg)))
+            .collect();
+        entry.push_str(&args.join(",\n"));
+        entry.push_str("\n    ]\n  }");
+        out.push_str(&entry);
+        if i + 1 < units.len() {
+            out.push(',');
+        }
+        out.push('\n');
+    }
+    out.push_str("]\n");
+    fs::write(p.root.join("compile_commands.json"), out)?;
+    Ok(())
+}
+
+// every include flag the real build uses, one source of truth for the compilers
+fn compile_flags(p: &Paths, is_cxx: bool) -> Vec<String> {
+    let mut flags: Vec<String> = if is_cxx { CXX_FLAGS } else { C_FLAGS }
+        .iter()
+        .map(|flag| flag.to_string())
+        .collect();
+    flags.extend(p.includes());
+    flags
+}
+
 fn compile(
     p: &Paths,
     prog: &mut Progress,
     compiler: &str,
     unit: &PathBuf,
-) -> Result<PathBuf, Box<dyn Error>> {
+) -> Result<(PathBuf, bool), Box<dyn Error>> {
     let name = unit
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_default();
     let stem = name.split('.').next().unwrap_or("unit").to_string();
     let obj = p.obj().join(format!("{stem}.o"));
+    let dep = p.obj().join(format!("{stem}.d"));
     let is_cxx = compiler.contains("++");
     let kind = if is_cxx { "CXX" } else { "C" };
+    let flags = compile_flags(p, is_cxx);
 
-    let mut flags: Vec<String> = if is_cxx { CXX_FLAGS } else { C_FLAGS }
-        .iter()
-        .map(|flag| flag.to_string())
-        .collect();
-    flags.extend(p.includes());
+    // skip the compile if the object is newer than the source and every header
+    if !obj_stale(&obj, &dep, unit) {
+        prog.step(&format!("Up-to-date {kind} object {}", p.rel(&obj)));
+        return Ok((obj, false));
+    }
 
     prog.step(&format!("Building {kind} object {}", p.rel(&obj)));
 
     let mut cmd = Command::new(compiler);
-    cmd.args(&flags).arg("-c").arg(unit).arg("-o").arg(&obj);
+    // -MMD -MP emit a sidecar depfile (sources + headers) for the staleness check,
+    // -MP adds phony targets so a removed header does not break the next build
+    cmd.args(&flags)
+        .arg("-MMD")
+        .arg("-MP")
+        .arg("-MF")
+        .arg(&dep)
+        .arg("-c")
+        .arg(unit)
+        .arg("-o")
+        .arg(&obj);
     println!("{}", cmd_line(&cmd));
     run_muted(&mut cmd)?;
 
-    Ok(obj)
+    Ok((obj, true))
 }
 
 fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
@@ -535,31 +723,55 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(p.obj())?;
     fs::create_dir_all(p.game())?;
 
+    let mut units: Vec<(PathBuf, bool)> = Vec::new();
+    for unit in C_UNITS {
+        units.push((p.root.join("src").join(unit), false));
+    }
+    for unit in CPP_UNITS {
+        units.push((p.root.join("src").join(unit), true));
+    }
+    for header in src_headers(p) {
+        let is_cxx = header.extension().and_then(|s| s.to_str()) == Some("hpp");
+        units.push((header, is_cxx));
+    }
+    compdb(p, &units)?;
+
     let mut objs: Vec<PathBuf> = Vec::new();
+    let mut any_rebuilt = false;
 
     for unit in C_UNITS {
-        objs.push(compile(
-            p,
-            &mut prog,
-            "gcc",
-            &p.root.join("src").join(unit),
-        )?);
+        let (obj, rebuilt) = compile(p, &mut prog, "gcc", &p.root.join("src").join(unit))?;
+        any_rebuilt |= rebuilt;
+        objs.push(obj);
     }
 
     for code in &codes {
-        objs.push(compile(p, &mut prog, "gcc", code)?);
+        let (obj, rebuilt) = compile(p, &mut prog, "gcc", code)?;
+        any_rebuilt |= rebuilt;
+        objs.push(obj);
     }
 
     for unit in CPP_UNITS {
-        objs.push(compile(
-            p,
-            &mut prog,
-            "g++",
-            &p.root.join("src").join(unit),
-        )?);
+        let (obj, rebuilt) = compile(p, &mut prog, "g++", &p.root.join("src").join(unit))?;
+        any_rebuilt |= rebuilt;
+        objs.push(obj);
     }
 
     let exe = p.game().join("nah_engine");
+
+    // link only if something changed or the exe is missing/older than the libs
+    let need_link = any_rebuilt
+        || mtime(&exe).is_none()
+        || is_newer(&luajit, &exe)
+        || objs.iter().any(|o| is_newer(o, &exe));
+    if !need_link {
+        prog.step(&format!("Up-to-date executable {}", p.rel(&exe)));
+        println!("make: nothing to do -> {}", exe.display());
+        deploy_luascripts(p);
+        deploy_assets(p);
+        return Ok(());
+    }
+
     prog.step(&format!("Linking CXX executable {}", p.rel(&exe)));
 
     let mut link = Command::new("g++");
@@ -568,6 +780,9 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     link.arg("-Wl,--whole-archive")
         .arg(&luajit)
         .arg("-Wl,--no-whole-archive");
+    // export-dynamic: ffi.C resolves symbols via dlsym on this process, the
+    // C functions (gachicreate etc) must live in the dynamic symbol table.
+    link.arg("-rdynamic");
     for obj in &objs {
         link.arg(obj);
     }
@@ -579,6 +794,7 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
     run_muted(&mut link)?;
 
     deploy_luascripts(p);
+    deploy_assets(p);
 
     println!("make: done -> {}", exe.display());
     Ok(())
