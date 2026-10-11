@@ -1,23 +1,63 @@
 use std::env;
 use std::error::Error;
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use std::thread;
+
+const RGFW_URL: &str = "https://github.com/ColleagueRiley/RGFW/releases/download/1.8.1/RGFW.h";
+
+/* every wayland protocol RGFW.h includes, relative to the wayland-protocols dir */
+const PROTOCOLS: &[(&str, &[&str])] = &[
+    ("xdg-shell", &["stable/xdg-shell/xdg-shell.xml"]),
+    (
+        "xdg-toplevel-icon-v1",
+        &["staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml"],
+    ),
+    (
+        "xdg-decoration-unstable-v1",
+        &["unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"],
+    ),
+    (
+        "relative-pointer-unstable-v1",
+        &["unstable/relative-pointer/relative-pointer-unstable-v1.xml"],
+    ),
+    (
+        "pointer-constraints-unstable-v1",
+        &["unstable/pointer-constraints/pointer-constraints-unstable-v1.xml"],
+    ),
+    (
+        "xdg-output-unstable-v1",
+        &["unstable/xdg-output/xdg-output-unstable-v1.xml"],
+    ),
+];
+
+const C_UNITS: &[&str] = &["window/rgfw.c"];
+const CPP_UNITS: &[&str] = &["main.cpp", "window/rgfw_shit.cpp"];
+
+const LIBS: &[&str] = &[
+    "vulkan",
+    "wayland-client",
+    "wayland-cursor",
+    "xkbcommon",
+    "dl",
+    "pthread",
+    "m",
+];
 
 fn project_root() -> Result<PathBuf, Box<dyn Error>> {
     let cwd = env::current_dir()?;
-    if cwd.join(".gitmodules").is_file() {
+    if cwd.join("Makefile").is_file() && cwd.join("src").is_dir() {
         return Ok(cwd);
     }
     if let Some(parent) = cwd.parent() {
-        if parent.join(".gitmodules").is_file() {
+        if parent.join("Makefile").is_file() && parent.join("src").is_dir() {
             return Ok(parent.to_path_buf());
         }
     }
     if let Ok(exe) = env::current_exe() {
         let mut p = exe.as_path().parent();
         while let Some(dir) = p {
-            if dir.join(".gitmodules").is_file() {
+            if dir.join("Makefile").is_file() && dir.join("src").is_dir() {
                 return Ok(dir.to_path_buf());
             }
             p = dir.parent();
@@ -35,6 +75,42 @@ fn project_root() -> Result<PathBuf, Box<dyn Error>> {
     Ok(cwd.parent().unwrap_or(&cwd).to_path_buf())
 }
 
+struct Paths {
+    root: PathBuf,
+}
+
+impl Paths {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        Ok(Self {
+            root: project_root()?,
+        })
+    }
+    fn external(&self) -> PathBuf {
+        self.root.join("shit/external")
+    }
+    fn build(&self) -> PathBuf {
+        self.root.join("shit/build")
+    }
+    fn bin(&self) -> PathBuf {
+        self.build().join("bin")
+    }
+    fn obj(&self) -> PathBuf {
+        self.build().join("obj")
+    }
+    fn binshaders(&self) -> PathBuf {
+        self.build().join("binshaders")
+    }
+    fn shaders(&self) -> PathBuf {
+        self.root.join("shaders")
+    }
+    fn rgfw_header(&self) -> PathBuf {
+        self.external().join("RGFW.h")
+    }
+    fn protocols(&self) -> PathBuf {
+        self.build().join("protocols")
+    }
+}
+
 fn run(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
     eprintln!("+ {:?}", cmd);
     let status = cmd.status()?;
@@ -44,170 +120,252 @@ fn run(cmd: &mut Command) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn depfetch() -> Result<(), Box<dyn Error>> {
-    let root = project_root()?;
-    println!("project root: {}", root.display());
-    let external = root.join("external");
-    std::fs::create_dir_all(&external)?;
-    let rgfw = external.join("RGFW.h");
-    run(Command::new("curl")
-        .arg("https://github.com/ColleagueRiley/RGFW/releases/download/1.8.1/RGFW.h")
-        .arg("-o")
-        .arg(&rgfw)
-        .arg("-L"))?;
-    let bgfx = external.join("bgfx");
-    let bimg = external.join("bimg");
-    let bx = external.join("bx");
-    if !bgfx.is_dir() || !bimg.is_dir() || !bx.is_dir() {
-        // NOTE: `git submodule --init` is invalid (init is a subcommand of update).
-        run(Command::new("git")
-            .arg("submodule")
-            .arg("update")
-            .arg("--init")
-            .arg("--recursive")
-            .current_dir(&root))?;
+fn depfetch(p: &Paths) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(p.external())?;
+    fs::create_dir_all(p.bin())?;
+    fs::create_dir_all(p.obj())?;
+    fs::create_dir_all(p.binshaders())?;
+
+    let rgfw = p.rgfw_header();
+    if !rgfw.is_file() {
+        run(Command::new("curl").arg(RGFW_URL).arg("-L").arg("-o").arg(&rgfw))?;
     } else {
-        run(Command::new("git")
-            .arg("submodule")
-            .arg("update")
-            .arg("--remote")
-            .arg("--merge")
-            .current_dir(&root))?;
+        println!("RGFW.h already present");
+    }
+
+    println!("project root: {}", p.root.display());
+    println!("depfetch: ok");
+    Ok(())
+}
+
+fn wayland_protocols_root() -> Result<PathBuf, Box<dyn Error>> {
+    let out = Command::new("pkg-config")
+        .args(["--variable=pkgdatadir", "wayland-protocols"])
+        .output()?;
+
+    if out.status.success() {
+        let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        if dir.is_dir() {
+            return Ok(dir);
+        }
+    }
+
+    let fallback = PathBuf::from("/usr/share/wayland-protocols");
+    if fallback.is_dir() {
+        return Ok(fallback);
+    }
+
+    Err("wayland-protocols not found (install libwayland-dev + wayland-protocols)".into())
+}
+
+fn scan_protocols(p: &Paths) -> Result<(), Box<dyn Error>> {
+    let root = wayland_protocols_root()?;
+    let out = p.protocols();
+    fs::create_dir_all(&out)?;
+
+    for (name, candidates) in PROTOCOLS {
+        let mut xml = None;
+        for rel in *candidates {
+            let path = root.join(rel);
+            if path.is_file() {
+                xml = Some(path);
+                break;
+            }
+        }
+        let xml = match xml {
+            Some(path) => path,
+            None => return Err(format!("wayland protocol {name} not found in {}", root.display()).into()),
+        };
+
+        let header = out.join(format!("{name}.h"));
+        let code = out.join(format!("{name}-protocol.c"));
+
+        run(Command::new("wayland-scanner")
+            .arg("client-header")
+            .arg(&xml)
+            .arg(&header))?;
+        run(Command::new("wayland-scanner")
+            .arg("private-code")
+            .arg(&xml)
+            .arg(&code))?;
+
+        println!("protocols: {name} -> {}", header.display());
+    }
+
+    Ok(())
+}
+
+fn shadermake(p: &Paths) -> Result<(), Box<dyn Error>> {
+    fs::create_dir_all(p.binshaders())?;
+    let shaders = p.shaders();
+    let out = p.binshaders();
+
+    let mut sources: Vec<PathBuf> = if shaders.is_dir() {
+        fs::read_dir(&shaders)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|f| {
+                matches!(
+                    f.extension().and_then(|s| s.to_str()),
+                    Some("vert") | Some("frag") | Some("comp")
+                )
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    sources.sort();
+
+    if sources.is_empty() {
+        println!("shadermake: no shader sources in {}", shaders.display());
+        return Ok(());
+    }
+
+    for src in &sources {
+        let stage = match src.extension().and_then(|s| s.to_str()) {
+            Some("vert") => "vert",
+            Some("frag") => "frag",
+            _ => "comp",
+        };
+        let stem = src.file_stem().unwrap().to_string_lossy().to_string();
+        let spv = out.join(format!("{stem}.spv"));
+        let header = out.join(format!("{stem}.bin.h"));
+
+        run(Command::new("glslc")
+            .arg(format!("-fshader-stage={stage}"))
+            .arg(src)
+            .arg("-o")
+            .arg(&spv))?;
+
+        let bytes = fs::read(&spv)?;
+        let mut h = String::new();
+        h.push_str(&format!("// generated from {stem}\n"));
+        h.push_str("#pragma once\n#include <stdint.h>\n");
+        h.push_str(&format!(
+            "static const uint32_t {}_size = {};\n",
+            stem,
+            bytes.len() / 4
+        ));
+        h.push_str(&format!(
+            "static const uint8_t {}_data[{}] = {{\n",
+            stem,
+            bytes.len()
+        ));
+        for chunk in bytes.chunks(16) {
+            let line: Vec<String> = chunk.iter().map(|b| format!("0x{b:02x},")).collect();
+            h.push_str(&line.join(""));
+            h.push('\n');
+        }
+        h.push_str("};\n");
+        fs::write(&header, h)?;
+        println!("shadermake: {} -> {}", src.display(), header.display());
     }
     Ok(())
 }
 
-fn depmake() -> Result<(), Box<dyn Error>> {
-    let root = project_root()?;
-    let bgfx = root.join("external/bgfx");
-    if !bgfx.is_dir() {
-        return Err("bgfx not found, run depfetch first".into());
-    }
-    if !bgfx.join("tools/bin/linux/shaderc").exists() {
-        let jobs = thread::available_parallelism()
-            .map(|n| n.to_string())
-            .unwrap_or_else(|_| "4".to_string());
-        run(Command::new("make")
-            .arg("linux-gcc")
-            .arg("-j")
-            .arg(jobs)
-            .current_dir(&bgfx))?;
-    }
-    println!("depmake: bgfx ready, libs at external/bgfx/.build/linux64_gcc/bin");
-    Ok(())
-}
+fn compile(
+    p: &Paths,
+    compiler: &str,
+    std: &str,
+    unit: &PathBuf,
+    extra: &[String],
+) -> Result<PathBuf, Box<dyn Error>> {
+    let name = unit
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let stem = name.split('.').next().unwrap_or("unit").to_string();
+    let obj = p.obj().join(format!("{stem}.o"));
 
-fn make() -> Result<(), Box<dyn Error>> {
-    let project_root = project_root()?;
-    if !all(
-        project_root.join("shaders/frag.bin.h").exists(),
-        project_root.join("shaders/vert.bin.h").exists(),
-    ) {
-        shadermake()?;
-    }
-
-    let bin_dir = project_root.join("external/bgfx/.build/linux64_gcc/bin");
-    let include_flags = [
-        format!("-I{}", project_root.join("external/bgfx/include").display()),
-        format!(
-            "-I{}",
-            project_root.join("external/bgfx/3rdparty").display()
-        ),
-        format!("-I{}", project_root.join("external/bgfx/bson").display()),
-        format!("-I{}", project_root.join("external/bx/include").display()),
+    let flags: Vec<String> = vec![
+        format!("-std={std}"),
+        "-Wall".into(),
+        "-Wextra".into(),
+        "-Wno-unused-result".into(),
+        "-O2".into(),
+        "-g".into(),
+        format!("-I{}", p.root.join("src").display()),
+        format!("-I{}", p.external().display()),
+        format!("-I{}", p.protocols().display()),
+        format!("-I{}", p.binshaders().display()),
     ];
 
-    let obj_dir = project_root.join("obj");
-    std::fs::create_dir_all(&obj_dir)?;
-    let bin_out = project_root.join("bin");
-    std::fs::create_dir_all(&bin_out)?;
-    let cwd = project_root.clone();
-
-    println!("building main.cpp");
-    let mut cmd = Command::new("g++");
-    cmd.args(["-std=c++20", "-Wall", "-Wextra", "-O0", "-g"]);
-    cmd.arg(format!("-I{}", project_root.join("src").display()));
-    for f in &include_flags {
-        cmd.arg(f);
-    }
-    cmd.arg("-DRGFW_VULKAN")
+    println!("compiling {name}");
+    run(Command::new(compiler)
+        .args(&flags)
+        .args(extra)
         .arg("-c")
-        .arg(project_root.join("src/main.cpp"))
+        .arg(unit)
         .arg("-o")
-        .arg(obj_dir.join("main.o"));
-    let status = cmd.current_dir(&cwd).status()?;
-    if !status.success() {
-        return Err("g++ main.cpp fucked up".into());
-    }
+        .arg(&obj))?;
 
-    println!("building rgfw.cpp");
-    let mut cmd = Command::new("g++");
-    cmd.args(["-std=c++20", "-Wall", "-Wextra", "-O0", "-g"]);
-    cmd.arg(format!("-I{}", project_root.join("src").display()));
-    cmd.arg(format!("-I{}", project_root.join("external").display()));
-    for f in &include_flags {
-        cmd.arg(f);
-    }
-    cmd.arg("-DRGFW_VULKAN")
-        .arg("-c")
-        .arg(project_root.join("src/rgfw.cpp"))
-        .arg("-o")
-        .arg(obj_dir.join("rgfw.o"));
-    let status = cmd.current_dir(&cwd).status()?;
-    if !status.success() {
-        return Err("g++ rgfw.cpp fucked up".into());
-    }
-
-    println!("linking");
-    let bgfx_libs = [
-        bin_dir.join("libbgfxRelease.a"),
-        bin_dir.join("libbxRelease.a"),
-        bin_dir.join("libbimgRelease.a"),
-    ];
-
-    let mut cmd = Command::new("g++");
-    cmd.arg(obj_dir.join("main.o"));
-    cmd.arg(obj_dir.join("rgfw.o"));
-    for lib in &bgfx_libs {
-        cmd.arg(lib);
-    }
-    cmd.args([
-        "-lX11",
-        "-lXrandr",
-        "-lXext",
-        "-lvulkan",
-        "-ldl",
-        "-lpthread",
-        "-o",
-    ]);
-    cmd.arg(bin_out.join("nah_engine"));
-    let status = cmd.current_dir(&cwd).status()?;
-    if !status.success() {
-        return Err("linking fucked up".into());
-    }
-
-    println!("make: done");
-    Ok(())
+    Ok(obj)
 }
 
-fn shadermake() -> Result<(), Box<dyn Error>> {
-    todo!("shadermake");
+fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
+    shadermake(p)?;
+    scan_protocols(p)?;
+
+    fs::create_dir_all(p.obj())?;
+    fs::create_dir_all(p.bin())?;
+
+    let mut objs: Vec<PathBuf> = Vec::new();
+
+    for unit in C_UNITS {
+        objs.push(compile(p, "gcc", "c11", &p.root.join("src").join(unit), &[])?);
+    }
+
+    for entry in fs::read_dir(p.protocols())? {
+        let path = entry?.path();
+        if path.extension().and_then(|s| s.to_str()) == Some("c") {
+            objs.push(compile(p, "gcc", "c11", &path, &[])?);
+        }
+    }
+
+    for unit in CPP_UNITS {
+        objs.push(compile(p, "g++", "c++20", &p.root.join("src").join(unit), &[])?);
+    }
+
+    let exe = p.bin().join("nah_engine");
+    println!("linking {}", exe.display());
+
+    let mut link = Command::new("g++");
+    for obj in &objs {
+        link.arg(obj);
+    }
+    for lib in LIBS {
+        link.arg(format!("-l{lib}"));
+    }
+    link.arg("-o").arg(&exe);
+    run(&mut link)?;
+
+    println!("make: done -> {}", exe.display());
+    Ok(())
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
     let args: Vec<String> = env::args().collect();
+    let p = Paths::new()?;
 
     if args.len() < 2 {
-        depfetch()?;
-    } else if args[1] == "make" {
-        make()?;
-    } else if args[1] == "depmake" {
-        depmake()?;
-    } else if args[1] == "shadermake" {
-        shadermake()?;
+        depfetch(&p)?;
     } else {
-        eprintln!("usage: depfetch [make|depmake|shadermake]");
-        std::process::exit(2);
+        match args[1].as_str() {
+            "make" => make(&p)?,
+            "depfetch" => depfetch(&p)?,
+            "shadermake" => shadermake(&p)?,
+            "protocols" => scan_protocols(&p)?,
+            "clean" => {
+                if p.build().is_dir() {
+                    fs::remove_dir_all(p.build())?;
+                }
+                println!("clean: removed {}", p.build().display());
+            }
+            other => {
+                eprintln!("unknown command: {other}");
+                eprintln!("usage: depfetch [make|depfetch|shadermake|protocols|clean]");
+                std::process::exit(2);
+            }
+        }
     }
     Ok(())
 }
