@@ -92,7 +92,8 @@ destructor tears it down) that owns every handle end to end:
 - surface via `rgfw::createSurface`, physical device pick (discrete GPU scores
   higher, needs graphics+present queues and `VK_KHR_swapchain`)
 - logical device, swapchain (sRGB if offered, FIFO/vsync, `minImageCount+1`)
-- swapchain image views, one color render pass, framebuffers
+- swapchain image views, one render pass (color + D32 depth), framebuffers per
+  `(frame slot, swapchain image)`, one depth image per frame slot
 - `MAX_FRAMES_IN_FLIGHT = 2`: command pool + per-frame command buffers, fences,
   per-frame `image_available` and per-swapchain-image `render_finished` semaphores
 - `beginFrame` waits the fence, acquires an image, begins the render pass and
@@ -101,13 +102,15 @@ destructor tears it down) that owns every handle end to end:
   `EventKind::resize`)
 
 `// BLACKBOX` marks `init`, `recreateSwapchain`, `beginFrame`, `endFrame`. The
-clear color is fixed `{ 0.08, 0.08, 0.10, 1.0 }`, the 2d layer draws on top.
+clear color is fixed `{ 0.08, 0.08, 0.10, 1.0 }`, depth clears to `1.0`.
 
 reusable RAII helpers live here too: `casino::Pipeline` (graphics pipeline over
-the device render pass, spirv vertex + fragment), `casino::GpuBuffer` (device
-local, host visible or staging), `casino::Texture` (image + view + sampler +
-descriptor set, uploaded through a one-shot command buffer). verified on this
-machine: RTX 3050, 1280x720, 3 images, zero validation errors.
+the device render pass, spirv vertex + fragment, vertex layout `vec3 pos, vec4
+color, vec2 uv`, a `mat4` push constant for the vertex stage, and a `depth_test`
+flag), `casino::GpuBuffer` (device local, host visible or staging),
+`casino::Texture` (image + view + sampler + descriptor set, uploaded through a
+one-shot command buffer). verified on this machine: RTX 3050, 1280x720, 3 images,
+zero validation errors.
 
 ### API
 
@@ -170,37 +173,54 @@ prim::TextureId uv = tex.acquire("assets/uv.png");   // same path -> same id
 tex.release(uv);
 ```
 
-`src/render/primitives.hpp` (`namespace prim`) is a 2d immediate-mode batcher on
-top of `casino::Device`. Coordinates are relative: `(0,0)` top-left, `(1,1)`
-bottom-right, y-down. One pipeline (vertex color * texture), textures come from
-the `TextureCache`, the white 1x1 lives there and stands in for untextured prims.
-`// BLACKBOX` on `init` and `drawImageFit`.
+`src/render/primitives.hpp` (`namespace prim`) is the batcher on top of
+`casino::Device`. It has two vertex streams and two pipelines that share one
+shader pair:
 
-- `drawRect`, `drawTriangle`, `drawImage` push vertices into a flat array;
-  `drawImage` takes either a `TextureId` or a raw `casino::Texture`
+- **3d** (`pipe3d`, depth tested): `drawTriangle3d`, `drawQuad3d`, `drawBox3d`
+  in world units. The vertex shader multiplies by the camera `view_proj` push
+  constant. `drawBox3d` shades faces by direction (no real lighting yet).
+- **2d** (`pipe2d`, no depth test): `drawRect`, `drawTriangle`, `drawImage`,
+  `drawImageFit`. Relative coords: `(0,0)` top-left, `(1,1)` bottom-right, y-down.
+  Mapped by an ortho matrix (`cam::ortho01`) and always drawn after the 3d pass,
+  so the HUD stays on top of the projection.
+
+`render` binds one vertex buffer per frame slot: the 3d stream is copied at offset
+0, the 2d stream right after it. It draws 3d first, then 2d. Textures come from the
+`TextureCache`, the white 1x1 lives there and stands in for untextured prims.
+`// BLACKBOX` on `init` and `drawImageFit`, `render`.
+
 - the `Anchor` enum (`top_left`/`top_right`/`bottom_left`/`bottom_right`/`center`)
-  replaces hand-written `w*0.5` math, `drawImageFit` keeps the pixel aspect square
+  replaces hand-written `w*0.5` math; `drawImageFit` keeps the pixel aspect square
   on a non square window by reading `device.currentExtent()`
-- verts are grouped into batches by descriptor set (one batch per texture),
-  `render` copies the array into the frame's host-visible vertex buffer and
-  issues one `vkCmdDraw` per batch
-- `MAX_VERTS = 65536`; an overflow drops the vertex
+- verts are grouped into batches by descriptor set (one batch per texture) inside
+  each stream
+- `MAX_VERTS = 65536` per stream; an overflow drops the vertex
 
 ```c++
 prim::Primitives prims;
 prims.init(device, tex);
 
 prims.begin();
-prims.drawRect(0.05f, 0.25f, 0.25f, 0.25f, prim::rgba(0.90f, 0.25f, 0.35f, 1.0f));
-prims.drawImage(uv, 0.5f, 0.72f, 0.55f, 0.3f, prim::Anchor::center);
+prims.setCamera(cam::defaultCamera());
+float floor[12] = { -4,0,-4, 4,0,-4, 4,0,4, -4,0,4 };
+prims.drawQuad3d(floor, prim::rgba(0.2f, 0.22f, 0.25f, 1.0f));
+prims.drawBox3d(-1, 0, -1, 1, 1, 1, prim::rgba(0.9f, 0.25f, 0.35f, 1.0f));
+prims.drawRect(0.0f, 0.0f, 1.0f, 0.1f, prim::rgba(0.15f, 0.15f, 0.2f, 0.85f));
 prims.render(device.currentCommand(), device.frameSlot());
 ```
 
+`src/render/camera.hpp` (`namespace cam`) holds column-major `Mat4` and the
+`Camera` struct: position `x,y,z`, `yaw`/`pitch` in radians (yaw 0 looks down
+`-z`, pitch clamped to +-1.5), vertical `fov` in radians, `near_plane`/`far_plane`.
+`viewProj(camera, aspect)` gives the projection matrix (depth 0..1, y flipped for
+vulkan). `ortho01()` maps `(0,0)..(1,1)` to ndc for the 2d layer.
+
 `src/render/drawlist.hpp` (`namespace prim`) is a retained draw list. It records
-`rect`/`triangle`/`image`/`imageFit` ops once and `replay(prims)` re-issues them
-into the batcher every frame, so a static scene is built once (from lua at
-startup) instead of re-issued through the ffi each frame. Dynamic draws can skip
-the list and hit the batcher directly. `MAX_OPS = 4096`.
+2d ops (`rect`/`triangle`/`image`/`imageFit`), 3d ops (`triangle3d`/`quad3d`/`box3d`)
+and a `camera`, once. `replay(prims)` re-issues them every frame, so a static scene
+is built once (from lua at startup) instead of re-issued through the ffi each
+frame. Dynamic draws can skip the list and hit the batcher directly. `MAX_OPS = 4096`.
 
 ### renderer: image
 
@@ -219,22 +239,23 @@ any launcher or working directory. Absolute paths pass through, a missing
 
 `src/ligma.hpp` is a thin `class Ligma` LuaJIT wrapper: `ligma_execute` runs a
 script, the constructor opens the standard libs, the destructor closes the
-state. It also exposes a small C API (`gachicreate` / `gachicum` / `gachiprint`
-on a `GachiMan` struct) that `main.lua` calls through the LuaJIT FFI. For
-`ffi.C` to resolve those symbols the binary is linked with `-rdynamic`.
+state. For `ffi.C` to resolve the `nah_*` symbols the binary is linked with
+`-rdynamic`.
 
 ### render C ABI (lua -> engine)
 
 `main()` builds the `casino::Device`, `prim::TextureCache`, `prim::Primitives` and
 `prim::DrawList`, packs them into a `NahCtx` and hands it to lua with `nah_bind`.
-From there `main.lua` drives the whole 2d scene through `extern "C"` wrappers, so
+From there `main.lua` drives the scene through `extern "C"` wrappers, so
 `main.cpp` stays nothing but `main()`:
 
 - `nah_tex(path)` -> a packed int64 texture handle (0 on failure)
 - `nah_clear()` resets the draw list
-- `nah_rect`, `nah_triangle` push a colored prim
+- `nah_camera(x, y, z, yaw, pitch, fov)` sets the 3d camera (radians)
+- `nah_tri3d`, `nah_quad3d`, `nah_box3d` push 3d prims in world units, depth tested
+- `nah_rect`, `nah_triangle` push 2d prims (relative coords), drawn over the 3d scene
 - `nah_image(handle, x, y, w, h, anchor)` and `nah_image_fit(handle, cx, cy, w, anchor)`
-  push an image; `anchor` is `0..4` for the `prim::Anchor` enum, `fit` keeps the
+  push a 2d image; `anchor` is `0..4` for the `prim::Anchor` enum, `fit` keeps the
   pixel aspect on any window
 
 the script builds the scene once at startup, the frame loop just calls
@@ -307,4 +328,4 @@ of C23 / C++23 that gcc 13 (the default on ubuntu-latest) accepts. LuaJIT lives 
 executable, and `make` pulls `libluajit.a` in with `-Wl,--whole-archive`:
 `luaL_openlibs` registers the C modules by name, so the linker would otherwise
 drop most of the archive. The link also passes `-rdynamic` so the LuaJIT FFI can
-`dlsym` the `GachiMan` C API out of the main executable.
+`dlsym` the `nah_*` C API out of the main executable.

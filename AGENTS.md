@@ -25,7 +25,7 @@ int serios_heavy_code(
 }
 ```
 #### classes
-camelCase. clean code. only in .hpp files
+only in .hpp files. 
 
 #### structs and typedef structs 
 Firstletterisuppercase

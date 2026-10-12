@@ -185,7 +185,12 @@ namespace casino {
         u32 image_count = 0;
         VkImage images[MAX_SWAPCHAIN_IMAGES] = {};
         VkImageView views[MAX_SWAPCHAIN_IMAGES] = {};
-        VkFramebuffer framebuffers[MAX_SWAPCHAIN_IMAGES] = {};
+        // one framebuffer per (frame slot, swapchain image), each slot owns its depth
+        VkFramebuffer framebuffers[MAX_FRAMES_IN_FLIGHT][MAX_SWAPCHAIN_IMAGES] = {};
+        VkImage depth_images[MAX_FRAMES_IN_FLIGHT] = {};
+        VkDeviceMemory depth_memory[MAX_FRAMES_IN_FLIGHT] = {};
+        VkImageView depth_views[MAX_FRAMES_IN_FLIGHT] = {};
+        static const VkFormat DEPTH_FORMAT = VK_FORMAT_D32_SFLOAT;
         VkRenderPass render_pass = VK_NULL_HANDLE;
 
         VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -207,7 +212,10 @@ namespace casino {
         bool createSwapchain(VkSwapchainKHR old_swapchain);
         bool createRenderPass();
         bool createViews();
+        bool createDepth();
+        void destroyDepth();
         bool createFramebuffers();
+        void destroyFramebuffers();
         bool createCommands();
         bool createSync();
 
@@ -399,36 +407,52 @@ namespace casino {
     }
 
     inline bool Device::createRenderPass() {
-        VkAttachmentDescription attachment = {};
-        attachment.format = surface_format.format;
-        attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-        attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentDescription attachments[2] = {};
+        attachments[0].format = surface_format.format;
+        attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[0].finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-        VkAttachmentReference reference = {};
-        reference.attachment = 0;
-        reference.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        attachments[1].format = DEPTH_FORMAT;
+        attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+
+        VkAttachmentReference color_ref = {};
+        color_ref.attachment = 0;
+        color_ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference depth_ref = {};
+        depth_ref.attachment = 1;
+        depth_ref.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
         VkSubpassDescription subpass = {};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &reference;
+        subpass.pColorAttachments = &color_ref;
+        subpass.pDepthStencilAttachment = &depth_ref;
 
         VkSubpassDependency dependency = {};
         dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
         dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+            VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+            VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
         VkRenderPassCreateInfo info = {};
         info.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-        info.attachmentCount = 1;
-        info.pAttachments = &attachment;
+        info.attachmentCount = 2;
+        info.pAttachments = attachments;
         info.subpassCount = 1;
         info.pSubpasses = &subpass;
         info.dependencyCount = 1;
@@ -452,21 +476,84 @@ namespace casino {
         return true;
     }
 
-    inline bool Device::createFramebuffers() {
-        for (u32 i = 0; i < image_count; i++) {
-            VkImageView attachments[1] = { views[i] };
-            VkFramebufferCreateInfo info = {};
-            info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-            info.renderPass = render_pass;
-            info.attachmentCount = 1;
-            info.pAttachments = attachments;
-            info.width = extent.width;
-            info.height = extent.height;
-            info.layers = 1;
-            if (!check(vkCreateFramebuffer(device, &info, NULL, &framebuffers[i]), "vkCreateFramebuffer"))
+    // one depth image per frame slot, sized to the current swapchain extent
+    inline bool Device::createDepth() {
+        for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; s++) {
+            VkImageCreateInfo img = {};
+            img.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            img.imageType = VK_IMAGE_TYPE_2D;
+            img.format = DEPTH_FORMAT;
+            img.extent = { extent.width, extent.height, 1 };
+            img.mipLevels = 1;
+            img.arrayLayers = 1;
+            img.samples = VK_SAMPLE_COUNT_1_BIT;
+            img.tiling = VK_IMAGE_TILING_OPTIMAL;
+            img.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            img.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (!check(vkCreateImage(device, &img, NULL, &depth_images[s]), "vkCreateImage(depth)"))
+                return false;
+
+            VkMemoryRequirements req = {};
+            vkGetImageMemoryRequirements(device, depth_images[s], &req);
+            VkMemoryAllocateInfo alloc = {};
+            alloc.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            alloc.allocationSize = req.size;
+            alloc.memoryTypeIndex = findMemoryType(gpu, req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (!check(vkAllocateMemory(device, &alloc, NULL, &depth_memory[s]), "vkAllocateMemory(depth)"))
+                return false;
+            vkBindImageMemory(device, depth_images[s], depth_memory[s], 0);
+
+            VkImageViewCreateInfo vinfo = {};
+            vinfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            vinfo.image = depth_images[s];
+            vinfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vinfo.format = DEPTH_FORMAT;
+            vinfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            vinfo.subresourceRange.levelCount = 1;
+            vinfo.subresourceRange.layerCount = 1;
+            if (!check(vkCreateImageView(device, &vinfo, NULL, &depth_views[s]), "vkCreateImageView(depth)"))
                 return false;
         }
         return true;
+    }
+
+    inline void Device::destroyDepth() {
+        for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; s++) {
+            if (depth_views[s]) vkDestroyImageView(device, depth_views[s], NULL);
+            if (depth_images[s]) vkDestroyImage(device, depth_images[s], NULL);
+            if (depth_memory[s]) vkFreeMemory(device, depth_memory[s], NULL);
+            depth_views[s] = VK_NULL_HANDLE;
+            depth_images[s] = VK_NULL_HANDLE;
+            depth_memory[s] = VK_NULL_HANDLE;
+        }
+    }
+
+    inline bool Device::createFramebuffers() {
+        for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; s++) {
+            for (u32 i = 0; i < image_count; i++) {
+                VkImageView attachments[2] = { views[i], depth_views[s] };
+                VkFramebufferCreateInfo info = {};
+                info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+                info.renderPass = render_pass;
+                info.attachmentCount = 2;
+                info.pAttachments = attachments;
+                info.width = extent.width;
+                info.height = extent.height;
+                info.layers = 1;
+                if (!check(vkCreateFramebuffer(device, &info, NULL, &framebuffers[s][i]), "vkCreateFramebuffer"))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    inline void Device::destroyFramebuffers() {
+        for (u32 s = 0; s < MAX_FRAMES_IN_FLIGHT; s++)
+            for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; i++) {
+                if (framebuffers[s][i]) vkDestroyFramebuffer(device, framebuffers[s][i], NULL);
+                framebuffers[s][i] = VK_NULL_HANDLE;
+            }
     }
 
     inline bool Device::createCommands() {
@@ -526,7 +613,7 @@ namespace casino {
         present_family = queues.present;
 
         bool ok = createDevice() && createSwapchain(VK_NULL_HANDLE) && createRenderPass() &&
-            createViews() && createFramebuffers() && createCommands() && createSync();
+            createViews() && createDepth() && createFramebuffers() && createCommands() && createSync();
         if (!ok) { shutdown(); return false; }
 
         VkPhysicalDeviceProperties props = {};
@@ -547,10 +634,10 @@ namespace casino {
             if (render_finished[i]) vkDestroySemaphore(device, render_finished[i], NULL);
 
         if (command_pool) vkDestroyCommandPool(device, command_pool, NULL);
-        for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; i++) {
-            if (framebuffers[i]) vkDestroyFramebuffer(device, framebuffers[i], NULL);
+        destroyFramebuffers();
+        destroyDepth();
+        for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; i++)
             if (views[i]) vkDestroyImageView(device, views[i], NULL);
-        }
         if (render_pass) vkDestroyRenderPass(device, render_pass, NULL);
         if (swapchain) vkDestroySwapchainKHR(device, swapchain, NULL);
         if (device) vkDestroyDevice(device, NULL);
@@ -580,6 +667,9 @@ namespace casino {
         memset(images, 0, sizeof(images));
         memset(views, 0, sizeof(views));
         memset(framebuffers, 0, sizeof(framebuffers));
+        memset(depth_images, 0, sizeof(depth_images));
+        memset(depth_memory, 0, sizeof(depth_memory));
+        memset(depth_views, 0, sizeof(depth_views));
         memset(commands, 0, sizeof(commands));
         memset(image_available, 0, sizeof(image_available));
         memset(render_finished, 0, sizeof(render_finished));
@@ -595,10 +685,10 @@ namespace casino {
             return;
 
         vkDeviceWaitIdle(device);
+        destroyFramebuffers();
+        destroyDepth();
         for (u32 i = 0; i < MAX_SWAPCHAIN_IMAGES; i++) {
-            if (framebuffers[i]) vkDestroyFramebuffer(device, framebuffers[i], NULL);
             if (views[i]) vkDestroyImageView(device, views[i], NULL);
-            framebuffers[i] = VK_NULL_HANDLE;
             views[i] = VK_NULL_HANDLE;
         }
 
@@ -610,7 +700,7 @@ namespace casino {
             if (!createRenderPass())
                 return;
         }
-        if (!createViews() || !createFramebuffers())
+        if (!createViews() || !createDepth() || !createFramebuffers())
             return;
     }
 
@@ -640,15 +730,16 @@ namespace casino {
         if (!check(vkBeginCommandBuffer(active_cmd, &begin), "vkBeginCommandBuffer"))
             return false;
 
-        VkClearValue clear = {};
-        for (int i = 0; i < 4; i++) clear.color.float32[i] = clear_color[i];
+        VkClearValue clears[2] = {};
+        for (int i = 0; i < 4; i++) clears[0].color.float32[i] = clear_color[i];
+        clears[1].depthStencil.depth = 1.0f;
         VkRenderPassBeginInfo pass = {};
         pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         pass.renderPass = render_pass;
-        pass.framebuffer = framebuffers[active_index];
+        pass.framebuffer = framebuffers[slot][active_index];
         pass.renderArea.extent = extent;
-        pass.clearValueCount = 1;
-        pass.pClearValues = &clear;
+        pass.clearValueCount = 2;
+        pass.pClearValues = clears;
         vkCmdBeginRenderPass(active_cmd, &pass, VK_SUBPASS_CONTENTS_INLINE);
 
         VkViewport viewport = {};
@@ -1005,8 +1096,9 @@ namespace casino {
         }
     };
 
-    // 2d graphics pipeline against the device render pass. expects vertices of
-    // layout { vec2 pos, vec4 color, vec2 uv } and one combined-image-sampler set.
+    // graphics pipeline against the device render pass. vertices are
+    // { vec3 pos, vec4 color, vec2 uv }, one combined-image-sampler set, and a
+    // 64 byte mat4 push constant. depth_test is off for the 2d overlay.
     class Pipeline {
     public:
         VkDevice device = VK_NULL_HANDLE;
@@ -1028,7 +1120,8 @@ namespace casino {
         }
 
         bool create(const Device& dev, const void* vert, size_t vert_bytes,
-            const void* frag, size_t frag_bytes, VkDescriptorSetLayout set_layout) { // BLACKBOX
+            const void* frag, size_t frag_bytes, VkDescriptorSetLayout set_layout,
+            bool depth_test) { // BLACKBOX
             destroy();
             device = dev.device;
 
@@ -1049,12 +1142,12 @@ namespace casino {
 
             VkVertexInputBindingDescription binding = {};
             binding.binding = 0;
-            binding.stride = 32; // vec2 + vec4 + vec2 floats
+            binding.stride = 36; // vec3 + vec4 + vec2 floats
             binding.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
             VkVertexInputAttributeDescription attrs[3] = {};
-            attrs[0] = { 0, 0, VK_FORMAT_R32G32_SFLOAT, 0 };
-            attrs[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8 };
-            attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT, 24 };
+            attrs[0] = { 0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0 };
+            attrs[1] = { 1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 12 };
+            attrs[2] = { 2, 0, VK_FORMAT_R32G32_SFLOAT, 28 };
 
             VkPipelineVertexInputStateCreateInfo vertex_input = {};
             vertex_input.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1083,6 +1176,13 @@ namespace casino {
             multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
             multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+            // the subpass has a depth attachment, so this state must always be set
+            VkPipelineDepthStencilStateCreateInfo depth = {};
+            depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+            depth.depthTestEnable = depth_test ? VK_TRUE : VK_FALSE;
+            depth.depthWriteEnable = depth_test ? VK_TRUE : VK_FALSE;
+            depth.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
             VkPipelineColorBlendAttachmentState blend_attach = {};
             blend_attach.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -1105,10 +1205,16 @@ namespace casino {
             dynamic.dynamicStateCount = 2;
             dynamic.pDynamicStates = dynamics;
 
+            VkPushConstantRange push = {};
+            push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+            push.size = 64; // mat4
+
             VkPipelineLayoutCreateInfo layout_info = {};
             layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
             layout_info.setLayoutCount = 1;
             layout_info.pSetLayouts = &set_layout;
+            layout_info.pushConstantRangeCount = 1;
+            layout_info.pPushConstantRanges = &push;
             if (!check(vkCreatePipelineLayout(device, &layout_info, NULL, &layout), "vkCreatePipelineLayout"))
                 return false;
 
@@ -1121,6 +1227,7 @@ namespace casino {
             info.pViewportState = &viewport;
             info.pRasterizationState = &raster;
             info.pMultisampleState = &multisample;
+            info.pDepthStencilState = &depth;
             info.pColorBlendState = &blend;
             info.pDynamicState = &dynamic;
             info.layout = layout;

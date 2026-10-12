@@ -9,6 +9,7 @@ extern "C" {
 }
 
 #include "render/textures.hpp"
+#include "render/camera.hpp"
 #include "render/primitives.hpp"
 #include "render/drawlist.hpp"
 
@@ -35,23 +36,6 @@ public:
     Ligma(const Ligma&) = delete;
     Ligma& operator=(const Ligma&) = delete;
 };
-
-struct GachiMan {
-    int cumCounter;
-    char* name;
-};
-
-extern "C" {
-    GachiMan gachicreate(char* name) {
-        return GachiMan {0,name};
-    }
-    void gachicum(GachiMan* g, int c) {
-        g->cumCounter+=c;
-    }
-    void gachiprint(GachiMan* g) {
-        printf("%s\n%d\n",g->name,g->cumCounter);
-    }
-}
 
 // the render objects main() owns, handed to lua through nah_bind. the ffi passes
 // them back as opaque pointers so the wrappers below never touch globals.
@@ -104,5 +88,39 @@ extern "C" {
     void nah_image_fit(long long handle, float cx, float cy, float w, int anchor) {
         if (g_nah != NULL && g_nah->list != NULL)
             g_nah->list->imageFit(prim::unpackId(handle), cx, cy, w, (prim::Anchor)anchor);
+    }
+
+    // 3d: world space, depth tested, drawn before the 2d overlay
+    void nah_tri3d(float ax, float ay, float az, float bx, float by, float bz,
+        float cx, float cy, float cz, float r, float g, float b, float a) {
+        if (g_nah != NULL && g_nah->list != NULL) {
+            float p[9] = { ax, ay, az, bx, by, bz, cx, cy, cz };
+            g_nah->list->triangle3d(p, prim::rgba(r, g, b, a));
+        }
+    }
+
+    void nah_quad3d(float ax, float ay, float az, float bx, float by, float bz,
+        float cx, float cy, float cz, float dx, float dy, float dz,
+        float r, float g, float b, float a) {
+        if (g_nah != NULL && g_nah->list != NULL) {
+            float p[12] = { ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz };
+            g_nah->list->quad3d(p, prim::rgba(r, g, b, a));
+        }
+    }
+
+    void nah_box3d(float x, float y, float z, float w, float h, float d,
+        float r, float g, float b, float a) {
+        if (g_nah != NULL && g_nah->list != NULL)
+            g_nah->list->box3d(x, y, z, w, h, d, prim::rgba(r, g, b, a));
+    }
+
+    // camera: position, yaw/pitch in radians, vertical fov in radians
+    void nah_camera(float x, float y, float z, float yaw, float pitch, float fov) {
+        if (g_nah != NULL && g_nah->list != NULL) {
+            cam::Camera& c = g_nah->list->camera;
+            c.x = x; c.y = y; c.z = z;
+            c.yaw = yaw; c.pitch = pitch;
+            c.fov = fov;
+        }
     }
 }

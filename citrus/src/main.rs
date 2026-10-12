@@ -783,7 +783,7 @@ fn make(p: &Paths) -> Result<(), Box<dyn Error>> {
         .arg(&luajit)
         .arg("-Wl,--no-whole-archive");
     // export-dynamic: ffi.C resolves symbols via dlsym on this process, the
-    // C functions (gachicreate etc) must live in the dynamic symbol table.
+    // C functions (nah_* etc) must live in the dynamic symbol table.
     link.arg("-rdynamic");
     for obj in &objs {
         link.arg(obj);
